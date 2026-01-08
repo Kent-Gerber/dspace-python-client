@@ -170,6 +170,8 @@ if incompatible:
 
 ### Documentation Management
 
+**Note:** The `dspace-docs` command is available after installing the package. If using a virtual environment, activate it first (`source venv/bin/activate`).
+
 ```bash
 # Update documentation manually
 dspace-docs update

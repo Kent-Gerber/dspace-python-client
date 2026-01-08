@@ -78,6 +78,8 @@ The client automatically manages DSpace REST API documentation:
 - **Version-specific branches** from DSpace/RestContract repository
 - **CLI tools** for manual management
 
+**Note:** The `dspace-docs` command is available after installing the package. If using a virtual environment, activate it first (`source venv/bin/activate`).
+
 ```bash
 # Update all documentation
 dspace-docs update
