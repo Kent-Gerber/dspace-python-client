@@ -1,7 +1,7 @@
 """Version compatibility system for DSpace client."""
 
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional, Union, Tuple
 from .exceptions import VersionIncompatibilityError
 
 
@@ -16,11 +16,17 @@ class DSpaceVersion:
     
     @classmethod
     def from_string(cls, version_str: str) -> "DSpaceVersion":
-        """Create DSpaceVersion from string like '7.6' or '8.0'."""
+        """
+        Create DSpaceVersion from string like '7.6', '8.0', or '9.0.1'.
+        Patch versions are ignored (9.0.1 -> 9.0).
+        """
         try:
-            major, minor = version_str.split('.')
-            return cls(int(major), int(minor))
-        except ValueError:
+            # Handle patch versions (e.g., "9.0.1" -> "9.0")
+            parts = version_str.split('.')
+            major = int(parts[0])
+            minor = int(parts[1]) if len(parts) > 1 else 0
+            return cls(major, minor)
+        except (ValueError, IndexError):
             raise ValueError(f"Invalid version string: {version_str}")
     
     @property
@@ -208,3 +214,80 @@ class VersionCompatibility:
                 incompatible[method_name] = incompatible_versions
         
         return incompatible
+    
+    @staticmethod
+    def check_server_version_compatibility(
+        server_version: str,
+        target_versions: List[str]
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Check if server version is compatible with target versions.
+        
+        Compatibility rules:
+        - Exact match (e.g., 9.0 == 9.0) → OK, no warning
+        - Minor version difference, same major (e.g., 9.0 vs 9.1) → OK with warning
+        - Major version difference (e.g., 7.x vs 8.0+) → NOT compatible
+        
+        Args:
+            server_version: Actual server version (e.g., "7.6", "9.1")
+            target_versions: List of target versions (e.g., ["8.0", "9.0"])
+        
+        Returns:
+            Tuple of (is_compatible: bool, warning_message: Optional[str])
+            - If major version mismatch: (False, None)
+            - If exact match: (True, None)
+            - If minor version difference: (True, warning_message)
+        """
+        if "bleeding-edge" in target_versions:
+            # Bleeding-edge allows any version, but warn if server is old
+            try:
+                server_v = DSpaceVersion.from_string(server_version)
+                if server_v.major < 7:
+                    return True, f"Server version {server_version} is quite old. Proceeding with caution."
+                return True, None
+            except ValueError:
+                # If we can't parse, allow it but warn
+                return True, f"Could not parse server version '{server_version}'. Proceeding with caution."
+        
+        try:
+            server_v = DSpaceVersion.from_string(server_version)
+        except ValueError:
+            # If we can't parse server version, we can't validate
+            return True, f"Could not parse server version '{server_version}'. Version validation skipped."
+        
+        # Check each target version
+        exact_match = False
+        same_major = False
+        target_majors = set()
+        
+        for target_version in target_versions:
+            try:
+                target_v = DSpaceVersion.from_string(target_version)
+                target_majors.add(target_v.major)
+                
+                if server_v.major == target_v.major and server_v.minor == target_v.minor:
+                    exact_match = True
+                elif server_v.major == target_v.major:
+                    same_major = True
+            except ValueError:
+                # Skip invalid target versions (shouldn't happen, but handle gracefully)
+                continue
+        
+        # Check for major version mismatch
+        if server_v.major not in target_majors:
+            return False, None
+        
+        # Exact match - no warning
+        if exact_match:
+            return True, None
+        
+        # Same major, different minor - warn but allow
+        if same_major:
+            target_versions_str = ", ".join(target_versions)
+            return True, (
+                f"Server version {server_version} differs from target version(s) {target_versions_str} "
+                f"(same major version, different minor). Proceeding with caution."
+            )
+        
+        # Should not reach here, but allow if we do
+        return True, None

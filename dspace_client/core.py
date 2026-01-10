@@ -13,7 +13,7 @@ from tenacity import (
     retry_if_result,
 )
 
-from .exceptions import DSpaceAPIError, VersionIncompatibilityError
+from .exceptions import DSpaceAPIError, VersionIncompatibilityError, ServerVersionMismatchError
 from .version import VersionCompatibility
 from .docs import RestContractFetcher
 
@@ -60,17 +60,24 @@ class DSpaceClient:
             jwt_token: JWT bearer token from authentication
             csrf_token: CSRF token for modifying requests (refreshed after login!)
             http_client: Authenticated HTTP client with cookies from auth flow
-            target_versions: DSpace version(s) to validate compatibility against.
-                This does NOT restrict which DSpace server you can connect to.
-                Instead, it ensures all operations work in the specified version(s).
+            target_versions: DSpace version(s) that this client is declared compatible with.
+                This restricts which DSpace servers you can connect to:
+                - Exact version match (e.g., 9.0 == 9.0) → OK
+                - Minor version difference (e.g., 9.0 vs 9.1, same major) → Warning but allowed
+                - Major version difference (e.g., 7.x vs 8.0+) → Connection rejected
                 
+                Values:
                 - "bleeding-edge" (default): Latest main branch from RestContract
                 - "7.0", "8.0", "9.0": Specific stable versions
-                - ["7.6", "8.0", "9.0"]: Multiple versions (validates against ALL)
+                - ["7.6", "8.0", "9.0"]: Multiple versions (server must match one)
                 
-                When multiple versions are specified, operations must work in ALL
-                of them. If an operation is not supported in any target version,
-                a VersionIncompatibilityError is raised before the API call.
+                After creating the client, call verify_server_version() to validate
+                the server version against target_versions. Consider using
+                create_validated_client() helper function for automatic validation.
+                
+                Note: This also ensures all operations work in the specified version(s).
+                If an operation is not supported in any target version, a
+                VersionIncompatibilityError is raised before the API call.
             timeout: Request timeout in seconds
             max_retries: Maximum number of retries for failed requests
             courtesy_delay: Delay in seconds between API calls (0 for no delay)
@@ -83,6 +90,10 @@ class DSpaceClient:
         5. Checkout correct branch/tag for each version
         6. Loads compatibility rules for validation
         7. Sets up automatic update checking
+        
+        Note: Version validation is NOT performed during __init__. Call
+        verify_server_version() after initialization, or use the
+        create_validated_client() helper function.
         """
         self.base_url = base_url.rstrip("/")
         self.jwt_token = jwt_token
@@ -96,6 +107,7 @@ class DSpaceClient:
         # Initialize version compatibility system
         self.validator = VersionCompatibility(target_versions)
         self.docs_fetcher = RestContractFetcher()
+        self.target_versions = target_versions if isinstance(target_versions, list) else [target_versions]
         
         # Fetch documentation for target versions (this will be async in real implementation)
         # For now, we'll assume docs are fetched during initialization
@@ -860,37 +872,119 @@ class DSpaceClient:
         response = await self._request("GET", f"eperson/epersons/{uuid}")
         return response.json()
     
-    async def detect_dspace_version(self) -> Optional[str]:
+    async def verify_server_version(self, raise_on_mismatch: bool = True) -> Optional[str]:
         """
-        Detect the DSpace version by testing API capabilities.
+        Verify that the connected server version is compatible with target_versions.
+        
+        This method should be called after client initialization to ensure the server
+        version matches the declared target versions. It will:
+        - Detect the server version from /api/config/properties
+        - Compare against target_versions
+        - Raise ServerVersionMismatchError for major version mismatches (if raise_on_mismatch=True)
+        - Print warnings for minor version differences
+        
+        Args:
+            raise_on_mismatch: If True, raise exception on major version mismatch.
+                             If False, return None on mismatch and only print warnings.
         
         Returns:
-            DSpace version string (e.g., "7.6", "9.0") or None if detection fails
+            Warning message string if minor version difference, None otherwise
+        
+        Raises:
+            ServerVersionMismatchError: If major version mismatch and raise_on_mismatch=True
         """
-        # Try to get a sample item to test capabilities
-        try:
-            # First, try to search for any items
-            results = await self.search_items(query="*", size=1, page=0)
-            items = results.get("_embedded", {}).get("searchResult", {}).get("_embedded", {}).get("objects", [])
-            
-            if not items:
+        from .version import VersionCompatibility
+        
+        server_version = await self.detect_dspace_version()
+        
+        if server_version is None:
+            console.print("[yellow]⚠[/yellow]  Could not detect server version. Version validation skipped.")
+            return None
+        
+        is_compatible, warning_msg = VersionCompatibility.check_server_version_compatibility(
+            server_version,
+            self.target_versions
+        )
+        
+        if not is_compatible:
+            error_msg = (
+                f"Server version {server_version} is not compatible with target version(s) "
+                f"{', '.join(self.target_versions)}. Major version mismatch detected."
+            )
+            if raise_on_mismatch:
+                raise ServerVersionMismatchError(
+                    server_version=server_version,
+                    target_versions=self.target_versions,
+                    message=error_msg
+                )
+            else:
+                console.print(f"[red]Error:[/red] {error_msg}")
                 return None
-            
-            # Get the first item UUID
-            item_uuid = items[0]["_embedded"]["indexableObject"]["uuid"]
-            
-            # Try the submitter endpoint - only exists in DSpace 9+
-            url = f"{self.base_url}/server/api/core/items/{item_uuid}/submitter"
+        
+        if warning_msg:
+            console.print(f"[yellow]⚠[/yellow]  {warning_msg}")
+            return warning_msg
+        
+        # Exact match or compatible version
+        target_versions_str = ", ".join(self.target_versions)
+        console.print(f"[green]✓[/green]  Server version {server_version} is compatible with target version(s) {target_versions_str}")
+        return None
+    
+    async def detect_dspace_version(self) -> Optional[str]:
+        """
+        Detect the actual DSpace server version from /api/config/properties.
+        
+        Returns:
+            DSpace version string (e.g., "7.6", "8.0", "9.1") or None if detection fails
+        """
+        try:
+            # Try to get version from config/properties endpoint
+            url = f"{self.base_url}/server/api/config/properties"
             headers = self._get_headers(include_csrf=False)
+            
             response = await self.client.get(url, headers=headers)
             
-            if response.status_code == 404:
-                # Endpoint doesn't exist - likely DSpace 7
-                return "7.6"  # Return latest 7.x
-            elif response.status_code in (200, 204):
-                # Endpoint exists - likely DSpace 9+
-                return "9.0"
+            if response.status_code == 200:
+                try:
+                    properties = response.json()
+                    version_str = properties.get("dspace.version")
+                    
+                    if version_str:
+                        # Parse and normalize version (handle patch versions like 9.0.1 -> 9.0)
+                        # DSpace versions are typically in format X.Y or X.Y.Z
+                        version_parts = version_str.split('.')
+                        if len(version_parts) >= 2:
+                            # Take only major.minor, ignore patch version
+                            normalized_version = f"{version_parts[0]}.{version_parts[1]}"
+                            return normalized_version
+                        else:
+                            console.print(f"[dim]Warning: Unexpected version format from server: {version_str}[/dim]")
+                            return version_str  # Return as-is if format is unexpected
+                    else:
+                        console.print(f"[dim]Warning: 'dspace.version' property not found in config/properties[/dim]")
+                        return None
+                except (ValueError, KeyError) as e:
+                    console.print(f"[dim]Warning: Could not parse version from config/properties: {e}[/dim]")
+                    return None
+            elif response.status_code == 401:
+                # Try unauthenticated access (some servers may allow this)
+                try:
+                    async with httpx.AsyncClient(timeout=self.timeout) as unauthenticated_client:
+                        unauthenticated_response = await unauthenticated_client.get(url)
+                        if unauthenticated_response.status_code == 200:
+                            properties = unauthenticated_response.json()
+                            version_str = properties.get("dspace.version")
+                            if version_str:
+                                version_parts = version_str.split('.')
+                                if len(version_parts) >= 2:
+                                    return f"{version_parts[0]}.{version_parts[1]}"
+                                return version_str
+                except Exception:
+                    pass
+                console.print(f"[dim]Warning: Could not access config/properties (status: {response.status_code})[/dim]")
+                return None
             else:
+                console.print(f"[dim]Warning: Could not access config/properties (status: {response.status_code})[/dim]")
                 return None
                 
         except Exception as e:

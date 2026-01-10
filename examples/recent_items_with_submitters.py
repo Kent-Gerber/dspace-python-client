@@ -115,12 +115,38 @@ def generate_csv_data(items_data: List[Dict]) -> str:
     return output.getvalue()
 
 
+def parse_target_versions(input_str: str):
+    """Parse target versions from user input."""
+    from typing import Union, List
+    input_str = input_str.strip()
+    if not input_str:
+        return "bleeding-edge"
+    
+    # Handle comma-separated list
+    versions = [v.strip() for v in input_str.split(",") if v.strip()]
+    if len(versions) == 1:
+        return versions[0]
+    return versions
+
+
 async def main():
     """Generate recent items report with submitter information."""
     
-    # Interactive prompt for base URL
+    # Prompt for target versions first
+    target_input = console.input(
+        "[bold cyan]Target DSpace versions[/bold cyan] [dim](comma-separated, e.g., 8.0,9.0 or press Enter for bleeding-edge):[/dim] "
+    ).strip()
+    target_versions = parse_target_versions(target_input)
+    
+    # Show supported versions in URL prompt
+    if isinstance(target_versions, list):
+        supported_str = ", ".join(target_versions)
+    else:
+        supported_str = target_versions
+    
+    # Interactive prompt for base URL with supported versions shown
     base_url = console.input(
-        "[bold cyan]DSpace base URL[/bold cyan] [dim](press Enter for https://demo.dspace.org):[/dim] "
+        f"[bold cyan]DSpace base URL[/bold cyan] [dim](supported versions: {supported_str}, press Enter for https://demo.dspace.org):[/dim] "
     ).strip()
     
     # Default to demo.dspace.org if user just pressed Enter
@@ -212,9 +238,18 @@ async def main():
         jwt_token=jwt,
         csrf_token=auth.csrf_token,
         http_client=auth.client,
-        target_versions="bleeding-edge",
+        target_versions=target_versions,
         courtesy_delay=courtesy_delay,
     )
+    
+    # Verify server version compatibility
+    from dspace_client import ServerVersionMismatchError
+    try:
+        await client.verify_server_version(raise_on_mismatch=True)
+    except ServerVersionMismatchError as e:
+        console.print(f"[red]Version mismatch:[/red] {e}")
+        await auth.close()
+        return
     
     # Detect DSpace version to check if submitter information is available
     console.print("[dim]Detecting DSpace version...[/dim]")

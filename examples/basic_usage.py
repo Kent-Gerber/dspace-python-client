@@ -2,18 +2,44 @@
 
 import asyncio
 import getpass
+from typing import Union, List
 from rich.console import Console
-from dspace_client import DSpaceAuthClient, DSpaceClient
+from dspace_client import create_validated_client, ServerVersionMismatchError
 
 console = Console()
+
+
+def parse_target_versions(input_str: str) -> Union[str, List[str]]:
+    """Parse target versions from user input."""
+    input_str = input_str.strip()
+    if not input_str:
+        return "bleeding-edge"
+    
+    # Handle comma-separated list
+    versions = [v.strip() for v in input_str.split(",") if v.strip()]
+    if len(versions) == 1:
+        return versions[0]
+    return versions
 
 
 async def main():
     """Demonstrate basic DSpace client usage."""
     
-    # Interactive prompt for base URL
+    # Prompt for target versions first
+    target_input = console.input(
+        "[bold cyan]Target DSpace versions[/bold cyan] [dim](comma-separated, e.g., 8.0,9.0 or press Enter for bleeding-edge):[/dim] "
+    ).strip()
+    target_versions = parse_target_versions(target_input)
+    
+    # Show supported versions in URL prompt
+    if isinstance(target_versions, list):
+        supported_str = ", ".join(target_versions)
+    else:
+        supported_str = target_versions
+    
+    # Interactive prompt for base URL with supported versions shown
     base_url = console.input(
-        "[bold cyan]DSpace base URL[/bold cyan] [dim](press Enter for https://demo.dspace.org):[/dim] "
+        f"[bold cyan]DSpace base URL[/bold cyan] [dim](supported versions: {supported_str}, press Enter for https://demo.dspace.org):[/dim] "
     ).strip()
     
     # Default to demo.dspace.org if user just pressed Enter
@@ -33,19 +59,19 @@ async def main():
         username = console.input("[bold cyan]Admin username:[/bold cyan] ").strip()
         password = getpass.getpass("Admin password: ")
     
-    # Authenticate
-    auth = DSpaceAuthClient(base_url)
-    jwt, status = await auth.authenticate(username, password)
-    
-    # Create client with version specification (REQUIRED)
-    # Default is "bleeding-edge" - latest development
-    client = DSpaceClient(
-        base_url=base_url,
-        jwt_token=jwt,
-        csrf_token=auth.csrf_token,
-        http_client=auth.client,
-        target_versions="bleeding-edge",  # or ["7.6", "8.0", "9.0"]
-    )
+    # Authenticate and create client with automatic version validation
+    try:
+        auth, client = await create_validated_client(
+            base_url=base_url,
+            username=username,
+            password=password,
+            target_versions=target_versions,
+        )
+        # Version validation happens automatically - if major version mismatch,
+        # ServerVersionMismatchError would have been raised
+    except ServerVersionMismatchError as e:
+        console.print(f"[red]Version mismatch:[/red] {e}")
+        return
     # On first run, this will fetch REST API docs from GitHub
     # Subsequent runs use cached docs
     

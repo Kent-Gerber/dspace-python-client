@@ -2,18 +2,44 @@
 
 import asyncio
 import getpass
+from typing import Union, List
 from rich.console import Console
-from dspace_client import DSpaceAuthClient, DSpaceClient
+from dspace_client import DSpaceAuthClient, DSpaceClient, ServerVersionMismatchError
 
 console = Console()
+
+
+def parse_target_versions(input_str: str) -> Union[str, List[str]]:
+    """Parse target versions from user input."""
+    input_str = input_str.strip()
+    if not input_str:
+        return "bleeding-edge"
+    
+    # Handle comma-separated list
+    versions = [v.strip() for v in input_str.split(",") if v.strip()]
+    if len(versions) == 1:
+        return versions[0]
+    return versions
 
 
 async def main():
     """Demonstrate advanced authentication and session management."""
     
-    # Interactive prompt for base URL
+    # Prompt for target versions first
+    target_input = console.input(
+        "[bold cyan]Target DSpace versions[/bold cyan] [dim](comma-separated, e.g., 8.0,9.0 or press Enter for bleeding-edge):[/dim] "
+    ).strip()
+    target_versions = parse_target_versions(target_input)
+    
+    # Show supported versions in URL prompt
+    if isinstance(target_versions, list):
+        supported_str = ", ".join(target_versions)
+    else:
+        supported_str = target_versions
+    
+    # Interactive prompt for base URL with supported versions shown
     base_url = console.input(
-        "[bold cyan]DSpace base URL[/bold cyan] [dim](press Enter for https://demo.dspace.org):[/dim] "
+        f"[bold cyan]DSpace base URL[/bold cyan] [dim](supported versions: {supported_str}, press Enter for https://demo.dspace.org):[/dim] "
     ).strip()
     
     if not base_url:
@@ -59,8 +85,15 @@ async def main():
         jwt_token=jwt,
         csrf_token=auth.csrf_token,
         http_client=auth.client,
-        target_versions="bleeding-edge",
+        target_versions=target_versions,
     )
+    
+    # Verify server version (advanced example - can also use create_validated_client helper)
+    try:
+        await client.verify_server_version(raise_on_mismatch=True)
+    except ServerVersionMismatchError as e:
+        console.print(f"[red]Version mismatch:[/red] {e}")
+        return
     
     # Check if session is still valid
     if await auth.is_session_valid():

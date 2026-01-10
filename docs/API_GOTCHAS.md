@@ -50,62 +50,101 @@ The items API in DSpace 7 does not expose submitter information through:
 
 ### Understanding `target_versions`
 
-The `target_versions` parameter in `DSpaceClient` specifies which DSpace versions you want to ensure your code is compatible with. **It does NOT restrict which DSpace server you can connect to.**
+The `target_versions` parameter in `DSpaceClient` restricts which DSpace servers you can connect to based on version compatibility rules.
 
-**Important clarifications:**
+**Version Compatibility Rules:**
 
-1. **You can connect to any DSpace server** - The client will work against any DSpace instance, regardless of the `target_versions` you specify.
+1. **Exact version match** (e.g., target `9.0` → server `9.0`) → ✅ Allowed, no warning
+2. **Minor version difference** (e.g., target `9.0` → server `9.1`, same major version) → ⚠️ Warning but allowed
+3. **Major version mismatch** (e.g., target `8.0` → server `7.6`, different major version) → ❌ Connection rejected with `ServerVersionMismatchError`
 
-2. **Validation is about code compatibility** - The `target_versions` parameter tells the client to validate that all operations you call are supported in the specified version(s). This helps you write code that works across multiple DSpace versions.
+4. **Multiple target versions** - When you specify multiple versions (e.g., `["8.0", "9.0"]`), the server must match **at least one** of them (or be a minor variant of one).
 
-3. **Multiple versions = strictest validation** - When you specify multiple versions, the client ensures that every operation you call works in **ALL** of those versions. If an operation doesn't exist in one of the target versions, the client will raise a `VersionIncompatibilityError` before making the request.
+5. **Operation validation** - Additionally, the client validates that all operations you call are supported in your target version(s). If an operation doesn't exist in all target versions, the client raises a `VersionIncompatibilityError` before making the request.
 
-4. **Pre-execution validation** - Validation happens **before** each API call, preventing runtime failures from version incompatibilities.
+**Recommended Usage - Use Helper Function:**
 
-**Examples:**
+The easiest way to use version validation is with the `create_validated_client()` helper:
 
 ```python
-# Compatible with DSpace 9 only - will validate operations against 9.0
-# But you can still connect to any DSpace server (7.x, 8.x, 9.x, etc.)
-client = DSpaceClient(base_url, jwt, csrf_token, http_client, target_versions="9.0")
+from dspace_client import create_validated_client, ServerVersionMismatchError
 
-# Compatible with DSpace 7.x - will validate operations against 7.6
-client = DSpaceClient(base_url, jwt, csrf_token, http_client, target_versions="7.6")
+try:
+    # Automatically authenticates, creates client, and validates server version
+    auth, client = await create_validated_client(
+        base_url="https://demo.dspace.org",
+        username="admin@example.com",
+        password="password",
+        target_versions=["8.0", "9.0"]  # Server must be 8.0 or 9.0 (or minor variants like 9.1)
+    )
+    # Version validation happened automatically
+    await client.create_community("My Community")
+except ServerVersionMismatchError as e:
+    print(f"Cannot connect: {e}")
+    print(f"Server version: {e.server_version}")
+    print(f"Target versions: {e.target_versions}")
+```
 
-# Compatible with multiple versions - operations must work in ALL three versions
-# This is the strictest validation mode
-client = DSpaceClient(base_url, jwt, csrf_token, http_client, target_versions=["7.6", "8.0", "9.0"])
+**Manual Usage:**
+
+If you create the client manually, call `verify_server_version()` after initialization:
+
+```python
+from dspace_client import DSpaceAuthClient, DSpaceClient, ServerVersionMismatchError
+
+auth = DSpaceAuthClient("https://demo.dspace.org")
+jwt, status = await auth.authenticate("user", "pass")
+
+client = DSpaceClient(
+    base_url="https://demo.dspace.org",
+    jwt_token=jwt,
+    csrf_token=auth.csrf_token,
+    http_client=auth.client,
+    target_versions=["8.0", "9.0"]
+)
+
+# Validate server version (raises ServerVersionMismatchError on major mismatch)
+try:
+    await client.verify_server_version(raise_on_mismatch=True)
+except ServerVersionMismatchError as e:
+    print(f"Version mismatch: {e}")
+    # Handle error...
 ```
 
 **Real-world scenario:**
 ```python
-# You're building an application that needs to work with DSpace 7.6, 8.0, and 9.0
-client = DSpaceClient(
-    base_url="https://production-dspace.org",  # This could be any version
-    jwt_token=jwt,
-    csrf_token=csrf,
-    http_client=http_client,
-    target_versions=["7.6", "8.0", "9.0"]  # Ensure code works in all these versions
+# You're building an application that works with DSpace 8.0 and 9.0
+auth, client = await create_validated_client(
+    base_url="https://production-dspace.org",
+    username="admin",
+    password="pass",
+    target_versions=["8.0", "9.0"]  # Server must be 8.0, 8.1, 9.0, 9.1, etc.
 )
 
-# This will work - create_community exists in all three versions
-await client.create_community("My Community")
+# If server is 7.6 → ServerVersionMismatchError is raised
+# If server is 8.0 → ✅ Allowed
+# If server is 8.1 → ⚠️ Warning but allowed (minor version difference)
+# If server is 9.0 → ✅ Allowed
+# If server is 9.1 → ⚠️ Warning but allowed (minor version difference)
+
+# Operations are also validated
+await client.create_community("My Community")  # Works - exists in 8.0 and 9.0
 
 # This will raise VersionIncompatibilityError BEFORE making the request
-# because get_item_submitter only exists in 9.0+, not in 7.6 or 8.0
+# because get_item_submitter only exists in 9.0+, not in 8.0
 try:
     await client.get_item_submitter(item_uuid)
 except VersionIncompatibilityError as e:
     print(f"Operation not supported in all target versions: {e}")
-    # You would need to handle this differently for DSpace 7.6/8.0
 ```
 
 ### Automatic Version Detection
 
-You can also detect the DSpace version automatically at runtime:
+The client automatically detects the server version using `/api/config/properties`:
 
 ```python
-# Detect DSpace version by testing API capabilities
+# Version detection happens automatically in verify_server_version()
+# But you can also call it manually:
 detected_version = await client.detect_dspace_version()
 
 if detected_version:
@@ -116,7 +155,7 @@ if detected_version:
         print("DSpace 9 - full feature support")
 ```
 
-This is useful for scripts that need to conditionally enable features based on the DSpace version.
+If version detection fails (e.g., `/api/config/properties` not accessible), a warning is shown but the connection proceeds.
 
 ## Other Known Differences
 

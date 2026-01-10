@@ -22,30 +22,25 @@ pip install dspace-client
 
 ```python
 import asyncio
-from dspace_client import DSpaceAuthClient, DSpaceClient
+from dspace_client import create_validated_client, ServerVersionMismatchError
 
 async def main():
-    # Authenticate
-    auth = DSpaceAuthClient("https://demo.dspace.org")
-    jwt, status = await auth.authenticate("user", "pass")
-    
-    # Create client with version specification
-    client = DSpaceClient(
-        base_url="https://demo.dspace.org",
-        jwt_token=jwt,
-        csrf_token=auth.csrf_token,
-        http_client=auth.client,
-        target_versions="bleeding-edge",  # or ["7.6", "8.0", "9.0"]
-    )
-    
-    # Create a community (validated against target versions)
-    community = await client.create_community("My Community")
-    print(f"Created: {community['uuid']}")
-    
-    await auth.close()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        # Authenticate and create client with automatic version validation
+        auth, client = await create_validated_client(
+            base_url="https://demo.dspace.org",
+            username="user",
+            password="pass",
+            target_versions=["8.0", "9.0"]  # Server version will be validated
+        )
+        
+        # Create a community (validated against target versions)
+        community = await client.create_community("My Community")
+        print(f"Created: {community['uuid']}")
+        
+        await auth.close()
+    except ServerVersionMismatchError as e:
+        print(f"Cannot connect: Server version mismatch - {e}")
 ```
 
 ## Version-First Architecture
@@ -65,43 +60,71 @@ client = DSpaceClient(..., target_versions="bleeding-edge")
 
 ### What `target_versions` Means
 
-**Important:** The `target_versions` parameter does **NOT** restrict which DSpace server you can connect to. Instead, it specifies which DSpace versions you want to ensure your code is compatible with.
+**Important:** The `target_versions` parameter restricts which DSpace servers you can connect to based on version compatibility rules.
 
 **Key points:**
 
-1. **You can connect to any DSpace server** - The client will work against any DSpace instance, regardless of the `target_versions` you specify.
+1. **Version restrictions** - When you specify `target_versions`, you declare which DSpace versions your code is compatible with. The client will validate the server version and:
+   - **Allow** connections to servers with exact version matches (e.g., target `9.0` → server `9.0`)
+   - **Warn but allow** connections to servers with minor version differences (e.g., target `9.0` → server `9.1`, same major version)
+   - **Reject** connections to servers with major version mismatches (e.g., target `8.0` → server `7.6`, different major version)
 
-2. **Validation is about compatibility** - The `target_versions` parameter tells the client to validate that all operations you call are supported in the specified version(s). This helps you write code that works across multiple DSpace versions.
+2. **Multiple versions** - When you specify multiple versions (e.g., `["8.0", "9.0"]`), the server must match **at least one** of the target versions. This allows your code to work with multiple DSpace installations.
 
-3. **Multiple versions = strictest validation** - When you specify multiple versions (e.g., `["7.6", "8.0", "9.0"]`), the client ensures that every operation you call works in **ALL** of those versions. This is useful when building applications that need to work across different DSpace installations.
+3. **Pre-execution validation** - Before each API call, the client also validates that the operation is supported in your target version(s). If not, it raises a `VersionIncompatibilityError` **before** making the request.
 
-4. **Pre-execution validation** - Before each API call, the client checks if the operation is compatible with your target versions. If not, it raises a `VersionIncompatibilityError` **before** making the request, preventing runtime failures.
+**Recommended Usage:**
 
-**Example:**
+Use the `create_validated_client()` helper function for automatic version validation:
+
 ```python
-# This client will validate operations against DSpace 7.6, 8.0, and 9.0
-# But you can still connect to any DSpace server (7.x, 8.x, 9.x, or even bleeding-edge)
+from dspace_client import create_validated_client, ServerVersionMismatchError
+
+try:
+    # Authenticates, creates client, and validates server version automatically
+    auth, client = await create_validated_client(
+        base_url="https://demo.dspace.org",
+        username="admin@example.com",
+        password="password",
+        target_versions=["8.0", "9.0"]  # Server must be 8.0 or 9.0 (or minor variants)
+    )
+    # Version validation happened automatically - if major mismatch, exception was raised
+    await client.create_community("My Community")
+except ServerVersionMismatchError as e:
+    print(f"Cannot connect: {e}")
+```
+
+**Manual Version Validation:**
+
+If you create the client manually, call `verify_server_version()` after initialization:
+
+```python
+from dspace_client import DSpaceAuthClient, DSpaceClient, ServerVersionMismatchError
+
+auth = DSpaceAuthClient("https://demo.dspace.org")
+jwt, status = await auth.authenticate("user", "pass")
+
 client = DSpaceClient(
-    base_url="https://any-dspace-server.org",  # Can be any DSpace instance
+    base_url="https://demo.dspace.org",
     jwt_token=jwt,
-    csrf_token=csrf,
-    http_client=http_client,
-    target_versions=["7.6", "8.0", "9.0"]  # Ensures code works in all these versions
+    csrf_token=auth.csrf_token,
+    http_client=auth.client,
+    target_versions=["8.0", "9.0"]
 )
 
-# This will work if create_community exists in 7.6, 8.0, AND 9.0
-await client.create_community("My Community")
-
-# This will raise VersionIncompatibilityError if get_item_submitter 
-# doesn't exist in ALL three versions (it only exists in 9.0+)
-await client.get_item_submitter(item_uuid)  # Will fail validation
+# Validate server version (raises ServerVersionMismatchError on major mismatch)
+try:
+    await client.verify_server_version(raise_on_mismatch=True)
+except ServerVersionMismatchError as e:
+    print(f"Version mismatch: {e}")
+    # Handle error...
 ```
 
 This ensures:
-- **Compatibility validation** before every API call
+- **Server version validation** prevents connecting to incompatible servers
+- **Operation compatibility validation** before every API call
 - **Automatic documentation fetching** for target versions
 - **Clear error messages** for version incompatibilities
-- **Cross-version compatibility** when targeting multiple versions
 
 ## Documentation Management
 
@@ -179,11 +202,22 @@ from dspace_client import (
     DSpaceClientError,
     AuthenticationError,
     DSpaceAPIError,
-    VersionIncompatibilityError
+    VersionIncompatibilityError,
+    ServerVersionMismatchError
 )
 
 try:
+    auth, client = await create_validated_client(
+        base_url="https://demo.dspace.org",
+        username="user",
+        password="pass",
+        target_versions=["8.0", "9.0"]
+    )
     await client.create_community("My Community")
+except ServerVersionMismatchError as e:
+    print(f"Server version mismatch: {e}")
+    print(f"Server version: {e.server_version}")
+    print(f"Target versions: {e.target_versions}")
 except VersionIncompatibilityError as e:
     print(f"Operation not supported: {e}")
     print(f"Supported versions: {e.supported_versions}")

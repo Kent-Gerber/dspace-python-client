@@ -51,3 +51,25 @@ class DocumentationError(DSpaceClientError):
 class NetworkError(DSpaceClientError):
     """Raised when network operations fail."""
     pass
+
+
+class ServerVersionMismatchError(DSpaceClientError):
+    """Raised when server version doesn't match target_versions."""
+    
+    def __init__(
+        self,
+        server_version: str,
+        target_versions: List[str],
+        message: Optional[str] = None
+    ):
+        self.server_version = server_version
+        self.target_versions = target_versions if isinstance(target_versions, list) else [target_versions]
+        
+        if message is None:
+            target_versions_str = ", ".join(self.target_versions)
+            message = (
+                f"Server version {server_version} is not compatible with target version(s) {target_versions_str}. "
+                f"Major version mismatch detected. Please connect to a server running one of the target versions."
+            )
+        
+        super().__init__(message)

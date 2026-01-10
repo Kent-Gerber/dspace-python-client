@@ -12,34 +12,102 @@ Key Features:
 - Batch operations with adaptive concurrency control
 
 Example:
-    from dspace_client import DSpaceAuthClient, DSpaceClient
+    from dspace_client import create_validated_client, ServerVersionMismatchError
     
-    # Authenticate
-    auth = DSpaceAuthClient("https://demo.dspace.org")
-    jwt, status = await auth.authenticate("user", "pass")
-    
-    # Create client with version specification
-    client = DSpaceClient(
-        base_url="https://demo.dspace.org",
-        jwt_token=jwt,
-        csrf_token=auth.csrf_token,
-        http_client=auth.client,
-        target_versions="bleeding-edge",  # or ["7.6", "8.0", "9.0"]
-    )
-    
-    # Create a community (validated against target versions)
-    community = await client.create_community("My Community")
+    try:
+        # Authenticate and create client with automatic version validation
+        auth, client = await create_validated_client(
+            base_url="https://demo.dspace.org",
+            username="user",
+            password="pass",
+            target_versions=["8.0", "9.0"]  # Server version will be validated
+        )
+        
+        # Create a community (validated against target versions)
+        community = await client.create_community("My Community")
+    except ServerVersionMismatchError as e:
+        print(f"Cannot connect: {e}")
 """
 
 from .auth import DSpaceAuthClient
 from .core import DSpaceClient
 from .batch import BatchItemCreator
 from .concurrency import ConcurrencyController, ConcurrencyConfig
+from typing import Union, List, Tuple
+
+
+async def create_validated_client(
+    base_url: str,
+    username: str,
+    password: str,
+    target_versions: Union[str, List[str]] = "bleeding-edge",
+    **client_kwargs
+) -> Tuple[DSpaceAuthClient, DSpaceClient]:
+    """
+    Authenticate and create DSpaceClient with automatic version validation.
+    
+    This helper function performs the complete flow:
+    1. Authenticate with DSpace server
+    2. Create DSpaceClient with specified target_versions
+    3. Verify server version compatibility
+    4. Raise ServerVersionMismatchError if major version mismatch
+    5. Print warnings for minor version differences
+    
+    Args:
+        base_url: DSpace server base URL
+        username: Username for authentication
+        password: Password for authentication
+        target_versions: DSpace version(s) that the client should be compatible with.
+                        Can be a single string (e.g., "9.0") or list (e.g., ["8.0", "9.0"]).
+                        Defaults to "bleeding-edge".
+        **client_kwargs: Additional keyword arguments passed to DSpaceClient constructor
+                        (timeout, max_retries, courtesy_delay, etc.)
+    
+    Returns:
+        Tuple of (auth_client, dspace_client)
+    
+    Raises:
+        AuthenticationError: If authentication fails
+        ServerVersionMismatchError: If server version major version doesn't match target_versions
+    
+    Example:
+        from dspace_client import create_validated_client
+        
+        auth, client = await create_validated_client(
+            base_url="https://demo.dspace.org",
+            username="admin@example.com",
+            password="password",
+            target_versions=["8.0", "9.0"]
+        )
+        
+        # Server version will be validated automatically
+        # If major version mismatch, ServerVersionMismatchError is raised
+        # If minor version difference, warning is printed but connection proceeds
+    """
+    # Authenticate
+    auth = DSpaceAuthClient(base_url, timeout=client_kwargs.get("timeout", 30.0))
+    jwt, status = await auth.authenticate(username, password)
+    
+    # Create client
+    client = DSpaceClient(
+        base_url=base_url,
+        jwt_token=jwt,
+        csrf_token=auth.csrf_token,
+        http_client=auth.client,
+        target_versions=target_versions,
+        **{k: v for k, v in client_kwargs.items() if k != "timeout"}
+    )
+    
+    # Verify server version (will raise ServerVersionMismatchError on major mismatch)
+    await client.verify_server_version(raise_on_mismatch=True)
+    
+    return auth, client
 from .exceptions import (
     DSpaceClientError,
     AuthenticationError,
     DSpaceAPIError,
     VersionIncompatibilityError,
+    ServerVersionMismatchError,
 )
 
 __version__ = "0.1.0"
@@ -61,4 +129,8 @@ __all__ = [
     "AuthenticationError", 
     "DSpaceAPIError",
     "VersionIncompatibilityError",
+    "ServerVersionMismatchError",
+    
+    # Helper functions
+    "create_validated_client",
 ]
