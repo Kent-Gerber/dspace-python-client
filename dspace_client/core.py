@@ -226,7 +226,8 @@ class DSpaceClient:
                 console.print(f"[red]  Body: {error_detail[:500]}[/red]")
                 
                 raise DSpaceAPIError(
-                    f"{method} {url} failed with status {response.status_code}: {error_detail}"
+                    f"{method} {url} failed with status {response.status_code}: {error_detail}",
+                    status_code=response.status_code,
                 )
             
             # Update last request time for courtesy delay
@@ -459,7 +460,8 @@ class DSpaceClient:
                 console.print(f"[red]  Status: {response.status_code}[/red]")
                 console.print(f"[red]  Body: {response.text[:500]}[/red]")
                 raise DSpaceAPIError(
-                    f"Bitstream upload failed with status {response.status_code}: {response.text}"
+                    f"Bitstream upload failed with status {response.status_code}: {response.text}",
+                    status_code=response.status_code,
                 )
             
             return response.json()
@@ -581,7 +583,8 @@ class DSpaceClient:
             
             if response.status_code >= 400:
                 raise DSpaceAPIError(
-                    f"Add EPerson to group failed with status {response.status_code}: {response.text}"
+                    f"Add EPerson to group failed with status {response.status_code}: {response.text}",
+                    status_code=response.status_code,
                 )
         
         except httpx.RequestError as e:
@@ -698,7 +701,8 @@ class DSpaceClient:
             
             if response.status_code >= 400:
                 raise DSpaceAPIError(
-                    f"Add subgroup failed with status {response.status_code}: {response.text}"
+                    f"Add subgroup failed with status {response.status_code}: {response.text}",
+                    status_code=response.status_code,
                 )
         
         except httpx.RequestError as e:
@@ -753,7 +757,8 @@ class DSpaceClient:
             
             if response.status_code >= 400:
                 raise DSpaceAPIError(
-                    f"Create collection item read group failed with status {response.status_code}: {response.text}"
+                    f"Create collection item read group failed with status {response.status_code}: {response.text}",
+                    status_code=response.status_code,
                 )
             
             return response.json()
@@ -808,7 +813,8 @@ class DSpaceClient:
             
             if response.status_code >= 400:
                 raise DSpaceAPIError(
-                    f"Create collection bitstream read group failed with status {response.status_code}: {response.text}"
+                    f"Create collection bitstream read group failed with status {response.status_code}: {response.text}",
+                    status_code=response.status_code,
                 )
             
             return response.json()
