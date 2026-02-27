@@ -1,4 +1,4 @@
-"""Adaptive concurrency control for DSpace operations."""
+"""Adaptive concurrency (and delay) control for DSpace operations."""
 
 import asyncio
 import time
@@ -258,6 +258,99 @@ class ConcurrencyController:
     async def get_metrics(self) -> PerformanceMetrics:
         """Get current performance metrics."""
         return await self.monitor.get_metrics(self.semaphore.current_limit)
+
+
+@dataclass
+class AdaptiveDelayConfig:
+    """Configuration for adaptive inter-operation delay control."""
+
+    initial_delay: float = 1.0
+    min_delay: float = 0.1
+    max_delay: float = 3.0
+    ramp_up_step: float = 0.1
+    ramp_down_step: float = 0.5
+    error_ramp_down_factor: float = 1.5
+    window_size: int = 20
+    min_samples_before_ramp: int = 5
+    latency_good_threshold: float = 0.8
+    latency_bad_threshold: float = 2.0
+
+
+class AdaptiveDelayController:
+    """
+    Adaptive controller for inter-operation delays (e.g., between discovery pages).
+
+    Tracks recent operation durations and error/rate-limit signals and adjusts the
+    delay between operations to balance throughput and server safety.
+    """
+
+    def __init__(self, config: Optional[AdaptiveDelayConfig] = None):
+        self.config = config or AdaptiveDelayConfig()
+        self._current_delay = float(self.config.initial_delay)
+        self._durations: deque = deque(maxlen=self.config.window_size)
+        self._statuses: deque = deque(maxlen=self.config.window_size)
+        self._lock = asyncio.Lock()
+
+    @property
+    def current_delay(self) -> float:
+        """Current delay in seconds before the next operation."""
+        return float(self._current_delay)
+
+    def get_delay(self) -> float:
+        """Return the current delay in seconds."""
+        return self.current_delay
+
+    async def record_result(self, duration: float, status: str = "ok") -> None:
+        """
+        Record the result of an operation and adjust delay if needed.
+
+        Args:
+            duration: Time in seconds the operation took (excluding any pre-delay).
+            status: One of "ok", "error", "rate_limited".
+        """
+        async with self._lock:
+            self._durations.append(float(duration))
+            self._statuses.append(status)
+
+            if len(self._durations) < self.config.min_samples_before_ramp:
+                return
+
+            recent = list(self._durations)
+            recent_sorted = sorted(recent)
+            idx = int(len(recent_sorted) * 0.95)
+            idx = min(max(idx, 0), len(recent_sorted) - 1)
+            p95 = recent_sorted[idx] if recent_sorted else 0.0
+
+            recent_statuses = list(self._statuses)[-3:]  # last few operations
+            has_error = any(s in ("error", "rate_limited") for s in recent_statuses)
+            has_rate_limited = any(s == "rate_limited" for s in recent_statuses)
+
+            # Ramp down (increase delay) on explicit rate-limit or high latency
+            if has_rate_limited or p95 > self.config.latency_bad_threshold:
+                if has_rate_limited:
+                    new_delay = self._current_delay * self.config.error_ramp_down_factor
+                else:
+                    new_delay = self._current_delay + self.config.ramp_down_step
+                self._current_delay = max(
+                    self.config.min_delay, min(self.config.max_delay, new_delay)
+                )
+                return
+
+            # Ramp down on generic errors (but less aggressively)
+            if has_error:
+                new_delay = self._current_delay + self.config.ramp_down_step
+                self._current_delay = max(
+                    self.config.min_delay, min(self.config.max_delay, new_delay)
+                )
+                return
+
+            # Ramp up (decrease delay) when latency is consistently good and no errors
+            if p95 < self.config.latency_good_threshold:
+                new_delay = self._current_delay - self.config.ramp_up_step
+                self._current_delay = max(
+                    self.config.min_delay, min(self.config.max_delay, new_delay)
+                )
+
     
     async def __aenter__(self):
         await self.acquire()

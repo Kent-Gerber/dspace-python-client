@@ -1,8 +1,28 @@
 """Version compatibility system for DSpace client."""
 
+import re
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Union, Tuple
 from .exceptions import VersionIncompatibilityError
+
+
+def _extract_major_minor(version_str: str) -> Optional[str]:
+    """
+    Extract a major.minor version substring from a free-form version string.
+
+    Examples:
+    - "7.6" -> "7.6"
+    - "DSpace 7.6" -> "7.6"
+    - "9.0.1" -> "9.0"
+    - "Version 9.0.1 (build 123)" -> "9.0"
+    """
+    if not version_str or not isinstance(version_str, str):
+        return None
+    # Find the first major.minor pattern, e.g. "7.6" in "DSpace 7.6" or "9.0" in "9.0.1"
+    match = re.search(r"(\d+)\.(\d+)", version_str)
+    if not match:
+        return None
+    return f"{match.group(1)}.{match.group(2)}"
 
 
 @dataclass
@@ -42,10 +62,11 @@ class VersionCompatibility:
     CRITICAL: Every API call is validated before execution.
     """
     
-    # Supported DSpace versions
+    # Supported DSpace versions (keys are valid target_versions; project has 7.6 REST contract in docs/dspace-rest-api/7.6/)
     SUPPORTED_VERSIONS = {
         "bleeding-edge": ["bleeding-edge"],  # Latest development
         "7.0": ["7.0", "7.1", "7.2", "7.3", "7.4", "7.5", "7.6"],
+        "7.6": ["7.6"],  # DSpace 7.6
         "8.0": ["8.0"],
         "9.0": ["9.0"],
     }
@@ -229,7 +250,8 @@ class VersionCompatibility:
         - Major version difference (e.g., 7.x vs 8.0+) → NOT compatible
         
         Args:
-            server_version: Actual server version (e.g., "7.6", "9.1")
+            server_version: Actual server version as reported by the server. This may be a
+                free-form string like "DSpace 7.6" or "9.0.1 (build ...)".
             target_versions: List of target versions (e.g., ["8.0", "9.0"])
         
         Returns:
@@ -238,10 +260,13 @@ class VersionCompatibility:
             - If exact match: (True, None)
             - If minor version difference: (True, warning_message)
         """
+        # Normalize the server version into a major.minor string where possible, while
+        # keeping the original string for messages.
+        normalized_server_version = _extract_major_minor(server_version) or server_version
         if "bleeding-edge" in target_versions:
             # Bleeding-edge allows any version, but warn if server is old
             try:
-                server_v = DSpaceVersion.from_string(server_version)
+                server_v = DSpaceVersion.from_string(normalized_server_version)
                 if server_v.major < 7:
                     return True, f"Server version {server_version} is quite old. Proceeding with caution."
                 return True, None
@@ -250,7 +275,7 @@ class VersionCompatibility:
                 return True, f"Could not parse server version '{server_version}'. Proceeding with caution."
         
         try:
-            server_v = DSpaceVersion.from_string(server_version)
+            server_v = DSpaceVersion.from_string(normalized_server_version)
         except ValueError:
             # If we can't parse server version, we can't validate
             return True, f"Could not parse server version '{server_version}'. Version validation skipped."

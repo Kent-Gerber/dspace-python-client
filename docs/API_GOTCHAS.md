@@ -160,7 +160,11 @@ except VersionIncompatibilityError as e:
 
 ### Automatic Version Detection
 
-The client automatically detects the server version using `/api/config/properties`:
+The client detects the server version by trying, in order:
+
+1. **GET /api/config/properties/dspace.version** (single-property endpoint; the main **GET /api/config/properties** is not implemented and returns 405 per the REST contract).
+2. **GET /server/api** (root HAL document), parsing a version field if present.
+3. **GET /actuator/info** (admin-only on some setups), parsing version from the response.
 
 ```python
 # Version detection happens automatically in verify_server_version()
@@ -175,7 +179,7 @@ if detected_version:
         print("DSpace 9 - full feature support")
 ```
 
-If version detection fails (e.g., `/api/config/properties` not accessible), a warning is shown but the connection proceeds.
+If all strategies fail (e.g. property not whitelisted, root/actuator not exposing version), a warning is shown but the connection proceeds.
 
 ## Other Known Differences
 

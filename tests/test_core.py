@@ -6,6 +6,7 @@ import httpx
 
 from dspace_client import DSpaceClient
 from dspace_client.exceptions import DSpaceAPIError, VersionIncompatibilityError
+from dspace_client.rest_pdf_cache import RestPDFCountCache
 
 
 class TestDSpaceClient:
@@ -312,3 +313,227 @@ class TestDSpaceClient:
                 }
             }
         )
+
+    # ----- Item bundles, bitstreams, formats, PDF count -----
+
+    @pytest.mark.asyncio
+    async def test_get_item_bundles_success(self, mock_dspace_client):
+        """Test get_item_bundles returns bundles list."""
+        bundles_data = {"bundles": [{"uuid": "bundle-uuid-1", "name": "ORIGINAL"}]}
+        mock_response = MagicMock()
+        mock_response.json.return_value = bundles_data
+        mock_dspace_client._request = AsyncMock(return_value=mock_response)
+        result = await mock_dspace_client.get_item_bundles("item-uuid-123")
+        assert result == bundles_data
+        mock_dspace_client._request.assert_called_once_with(
+            "GET", "core/items/item-uuid-123/bundles"
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_bundle_bitstreams_with_embed(self, mock_dspace_client):
+        """Test get_bundle_bitstreams with embed_format=True."""
+        bitstreams_data = {
+            "_embedded": {
+                "bitstreams": [
+                    {"uuid": "bs-1", "_embedded": {"format": {"id": 3, "shortDescription": "PDF"}}}
+                ]
+            }
+        }
+        mock_response = MagicMock()
+        mock_response.json.return_value = bitstreams_data
+        mock_dspace_client._request = AsyncMock(return_value=mock_response)
+        result = await mock_dspace_client.get_bundle_bitstreams("bundle-uuid", embed_format=True)
+        assert result == bitstreams_data
+        mock_dspace_client._request.assert_called_once_with(
+            "GET", "core/bundles/bundle-uuid/bitstreams", params={"embed": "format"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_bitstream_format_success(self, mock_dspace_client):
+        """Test get_bitstream_format returns format object."""
+        format_data = {"id": 3, "shortDescription": "PDF", "mimetype": "application/pdf"}
+        mock_response = MagicMock()
+        mock_response.json.return_value = format_data
+        mock_dspace_client._request = AsyncMock(return_value=mock_response)
+        result = await mock_dspace_client.get_bitstream_format("bitstream-uuid")
+        assert result == format_data
+        mock_dspace_client._request.assert_called_once_with(
+            "GET", "core/bitstreams/bitstream-uuid/format"
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_bitstream_formats_success(self, mock_dspace_client):
+        """Test get_bitstream_formats returns paginated formats."""
+        formats_data = {
+            "_embedded": {
+                "bitstreamformats": [
+                    {"id": 3, "shortDescription": "PDF", "mimetype": "application/pdf"}
+                ]
+            }
+        }
+        mock_response = MagicMock()
+        mock_response.json.return_value = formats_data
+        mock_dspace_client._request = AsyncMock(return_value=mock_response)
+        result = await mock_dspace_client.get_bitstream_formats(page=0, size=100)
+        assert result == formats_data
+        mock_dspace_client._request.assert_called_once_with(
+            "GET", "core/bitstreamformats", params={"page": 0, "size": 100}
+        )
+
+    @pytest.mark.asyncio
+    async def test_resolve_pdf_format_id_override(self, mock_dspace_client):
+        """Test resolve_pdf_format_id with override returns override."""
+        result = await mock_dspace_client.resolve_pdf_format_id(override_format_id=3)
+        assert result == 3
+
+    @pytest.mark.asyncio
+    async def test_resolve_pdf_format_id_from_registry(self, mock_dspace_client):
+        """Test resolve_pdf_format_id resolves from registry."""
+        formats_data = {
+            "_embedded": {
+                "bitstreamformats": [
+                    {"id": 5, "shortDescription": "XML"},
+                    {"id": 3, "shortDescription": "PDF", "mimetype": "application/pdf"},
+                ]
+            }
+        }
+        mock_dspace_client.get_bitstream_formats = AsyncMock(return_value=formats_data)
+        result = await mock_dspace_client.resolve_pdf_format_id(override_format_id=None)
+        assert result == 3
+
+    @pytest.mark.asyncio
+    async def test_count_items_with_bitstream_format(self, mock_dspace_client):
+        """Test count_items_with_bitstream_format returns count and total."""
+        # Page 1: two items
+        search_page1 = {
+            "_embedded": {
+                "searchResult": {
+                    "_embedded": {
+                        "objects": [
+                            {"_embedded": {"indexableObject": {"uuid": "item-1"}}},
+                            {"_embedded": {"indexableObject": {"uuid": "item-2"}}},
+                        ]
+                    }
+                }
+            }
+        }
+        # Page 2: empty (stop)
+        search_page2 = {"_embedded": {"searchResult": {"_embedded": {"objects": []}}}}
+        mock_dspace_client.search_items = AsyncMock(side_effect=[search_page1, search_page2])
+        mock_dspace_client.get_item_bundles = AsyncMock(
+            return_value={"bundles": [{"uuid": "bundle-1"}]}
+        )
+        # Item 1: one bitstream with format id 3 (PDF)
+        # Item 2: no PDF
+        bitstreams_with_pdf = {
+            "_embedded": {
+                "bitstreams": [
+                    {"uuid": "bs-1", "_embedded": {"format": {"id": 3}}}
+                ]
+            }
+        }
+        bitstreams_no_pdf = {
+            "_embedded": {
+                "bitstreams": [
+                    {"uuid": "bs-2", "_embedded": {"format": {"id": 5}}}
+                ]
+            }
+        }
+        mock_dspace_client.get_bundle_bitstreams = AsyncMock(
+            side_effect=[bitstreams_with_pdf, bitstreams_no_pdf]
+        )
+        # Fallback path may call get_bitstream_format when format not embedded
+        mock_dspace_client.get_bitstream_format = AsyncMock(return_value={"id": 5})
+        result = await mock_dspace_client.count_items_with_bitstream_format(
+            format_id=3, page_size=100, delay_between_pages=0, delay_between_items=0
+        )
+        assert result["count"] == 1
+        assert result["total_items_processed"] == 2
+
+    @pytest.mark.asyncio
+    async def test_count_items_with_pdf_bitstream(self, mock_dspace_client):
+        """Test count_items_with_pdf_bitstream resolves PDF id and returns count."""
+        mock_dspace_client.resolve_pdf_format_id = AsyncMock(return_value=3)
+        mock_dspace_client.count_items_with_bitstream_format = AsyncMock(
+            return_value={"count": 42, "total_items_processed": 100}
+        )
+        result = await mock_dspace_client.count_items_with_pdf_bitstream(
+            pdf_format_id=None, delay_between_pages=0
+        )
+        assert result["count"] == 42
+        assert result["total_items_processed"] == 100
+        assert result["pdf_format_id"] == 3
+        mock_dspace_client.resolve_pdf_format_id.assert_called_once_with(override_format_id=None)
+        mock_dspace_client.count_items_with_bitstream_format.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_count_items_with_bitstream_format_uses_cache(self, mock_dspace_client, tmp_path):
+        """When cache has entries and force_rerun is False, cached items are skipped (no bundle API calls)."""
+        search_page1 = {
+            "_embedded": {
+                "searchResult": {
+                    "_embedded": {
+                        "objects": [
+                            {"_embedded": {"indexableObject": {"uuid": "item-1"}}},
+                            {"_embedded": {"indexableObject": {"uuid": "item-2"}}},
+                        ]
+                    }
+                }
+            }
+        }
+        search_page2 = {"_embedded": {"searchResult": {"_embedded": {"objects": []}}}}
+        mock_dspace_client.search_items = AsyncMock(side_effect=[search_page1, search_page2])
+        mock_dspace_client.get_item_bundles = AsyncMock()  # should never be called when cache hits
+
+        cache = RestPDFCountCache(base_url="https://test.edu", cache_dir=tmp_path)
+        cache.update("item-1", True)   # has PDF
+        cache.update("item-2", False)  # no PDF
+
+        result = await mock_dspace_client.count_items_with_bitstream_format(
+            format_id=3,
+            page_size=100,
+            delay_between_pages=0,
+            delay_between_items=0,
+            cache=cache,
+            force_rerun=False,
+        )
+        assert result["count"] == 1
+        assert result["total_items_processed"] == 2
+        # No get_item_bundles calls because both items were in cache
+        mock_dspace_client.get_item_bundles.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_detect_dspace_version_single_property(self, mock_dspace_client):
+        """Test detect_dspace_version uses config/properties/dspace.version and parses values[0]."""
+        from unittest.mock import MagicMock
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"name": "dspace.version", "values": ["7.6"]}
+        mock_dspace_client.client.get = AsyncMock(return_value=mock_response)
+        result = await mock_dspace_client.detect_dspace_version()
+        assert result == "7.6"
+        mock_dspace_client.client.get.assert_called()
+        first_call_url = mock_dspace_client.client.get.call_args_list[0][0][0]
+        assert "config/properties/dspace.version" in first_call_url
+
+    @pytest.mark.asyncio
+    async def test_detect_dspace_version_normalize_patch(self, mock_dspace_client):
+        """Test detect_dspace_version normalizes 9.0.1 to 9.0."""
+        from unittest.mock import MagicMock
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"name": "dspace.version", "values": ["9.0.1"]}
+        mock_dspace_client.client.get = AsyncMock(return_value=mock_response)
+        result = await mock_dspace_client.detect_dspace_version()
+        assert result == "9.0"
+
+    @pytest.mark.asyncio
+    async def test_detect_dspace_version_handles_prefixed_string(self, mock_dspace_client):
+        """Test detect_dspace_version extracts version from 'DSpace 7.6'."""
+        from unittest.mock import MagicMock
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"name": "dspace.version", "values": ["DSpace 7.6"]}
+        mock_dspace_client.client.get = AsyncMock(return_value=mock_response)
+        result = await mock_dspace_client.detect_dspace_version()
+        assert result == "7.6"

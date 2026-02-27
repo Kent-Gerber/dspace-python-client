@@ -43,6 +43,8 @@ from .auth import DSpaceAuthClient
 from .core import DSpaceClient
 from .batch import BatchItemCreator
 from .concurrency import ConcurrencyController, ConcurrencyConfig
+from .oai import OAIClient
+from .rest_pdf_cache import RestPDFCountCache
 from typing import Union, List, Tuple
 
 
@@ -118,6 +120,7 @@ from .exceptions import (
     DSpaceAPIError,
     VersionIncompatibilityError,
     ServerVersionMismatchError,
+    OAIError,
 )
 
 __version__ = "0.1.0"
@@ -127,20 +130,20 @@ __email__ = "bram@atmire.com"
 __all__ = [
     # Main client classes
     "DSpaceAuthClient",
-    "DSpaceClient", 
+    "DSpaceClient",
     "BatchItemCreator",
-    
+    "OAIClient",
+    "RestPDFCountCache",
     # Concurrency control
     "ConcurrencyController",
     "ConcurrencyConfig",
-    
     # Exceptions
     "DSpaceClientError",
-    "AuthenticationError", 
+    "AuthenticationError",
     "DSpaceAPIError",
     "VersionIncompatibilityError",
     "ServerVersionMismatchError",
-    
+    "OAIError",
     # Helper functions
     "create_validated_client",
 ]

@@ -73,3 +73,12 @@ class ServerVersionMismatchError(DSpaceClientError):
             )
         
         super().__init__(message)
+
+
+class OAIError(DSpaceClientError):
+    """Raised when an OAI-PMH repository returns an error response."""
+
+    def __init__(self, code: str, message: Optional[str] = None):
+        self.code = code
+        self.message = message or code
+        super().__init__(f"OAI-PMH error: {self.code} - {self.message}")

@@ -1,8 +1,13 @@
 """Core DSpace REST API client for CRUD operations with version validation."""
 
+import asyncio
+import logging
+import re
+import time
+
 import httpx
 import orjson
-from typing import Any, Optional, Union, List
+from typing import Any, Optional, Union, List, Callable
 from pathlib import Path
 from rich.console import Console
 from tenacity import (
@@ -16,7 +21,11 @@ from tenacity import (
 from .exceptions import DSpaceAPIError, VersionIncompatibilityError, ServerVersionMismatchError
 from .version import VersionCompatibility
 from .docs import RestContractFetcher
+from .concurrency import AdaptiveDelayController, AdaptiveDelayConfig
 
+from .rest_pdf_cache import RestPDFCountCache
+
+logger = logging.getLogger(__name__)
 console = Console()
 
 
@@ -46,6 +55,8 @@ class DSpaceClient:
         timeout: float = 30.0,
         max_retries: int = 3,
         courtesy_delay: float = 1.0,
+        slow_request_threshold_seconds: float = 5.0,
+        slow_request_callback: Optional[Callable[[str, str, float], None]] = None,
     ):
         """
         Initialize DSpace API client with version compatibility checking.
@@ -81,6 +92,10 @@ class DSpaceClient:
             timeout: Request timeout in seconds
             max_retries: Maximum number of retries for failed requests
             courtesy_delay: Delay in seconds between API calls (0 for no delay)
+            slow_request_threshold_seconds: If a request takes longer than this, it is
+                logged at WARNING and optional callback is invoked (default 5.0).
+            slow_request_callback: Optional callback(method, endpoint, duration_seconds)
+                for slow requests; use to collect or display slow-request patterns.
         
         On initialization:
         1. Validates target_versions parameter
@@ -103,6 +118,8 @@ class DSpaceClient:
         self.max_retries = max_retries
         self.courtesy_delay = courtesy_delay
         self._last_request_time = 0.0
+        self.slow_request_threshold_seconds = slow_request_threshold_seconds
+        self.slow_request_callback = slow_request_callback
         
         # Initialize version compatibility system
         self.validator = VersionCompatibility(target_versions)
@@ -165,7 +182,6 @@ class DSpaceClient:
         
         # STEP 2: Apply courtesy delay
         if self.courtesy_delay > 0:
-            import time
             import asyncio
             elapsed = time.time() - self._last_request_time
             if elapsed < self.courtesy_delay:
@@ -197,6 +213,7 @@ class DSpaceClient:
         #     if json_data:
         #         console.print(f"[dim]  Body keys: {list(json_data.keys())}[/dim]")
         
+        request_start = time.perf_counter()
         try:
             response = await self.client.request(
                 method,
@@ -230,12 +247,22 @@ class DSpaceClient:
                 )
             
             # Update last request time for courtesy delay
-            import time
             self._last_request_time = time.time()
             return response
         
         except httpx.RequestError as e:
             raise DSpaceAPIError(f"Request failed: {e}")
+        finally:
+            duration = time.perf_counter() - request_start
+            if duration >= self.slow_request_threshold_seconds:
+                logger.warning(
+                    "Slow request: %s %s %.2fs",
+                    method,
+                    endpoint,
+                    duration,
+                )
+                if self.slow_request_callback:
+                    self.slow_request_callback(method, endpoint, duration)
     
     # ========== Communities ==========
     
@@ -470,7 +497,85 @@ class DSpaceClient:
     async def delete_bitstream(self, uuid: str) -> None:
         """Delete a bitstream by UUID."""
         await self._request("DELETE", f"core/bitstreams/{uuid}")
-    
+
+    async def get_item_bundles(self, item_uuid: str) -> dict:
+        """
+        Get the list of bundles for an item (no full item metadata).
+
+        GET core/items/{uuid}/bundles. Returns the bundles list (links + minimal
+        representation), not the full item.
+
+        Args:
+            item_uuid: UUID of the item
+
+        Returns:
+            Response with "bundles" or "_embedded"."bundles" list
+        """
+        response = await self._request("GET", f"core/items/{item_uuid}/bundles")
+        return response.json()
+
+    async def get_bundle_bitstreams(
+        self, bundle_uuid: str, embed_format: bool = True
+    ) -> dict:
+        """
+        Get bitstreams in a bundle, optionally with format embedded.
+
+        GET core/bundles/{uuid}/bitstreams. When embed_format=True, requests
+        ?embed=format so each bitstream includes format (with id). If the server
+        does not support embed on this endpoint, format will be absent and callers
+        may need to fetch format per bitstream via get_bitstream_format().
+
+        Args:
+            bundle_uuid: UUID of the bundle
+            embed_format: If True, request embed=format to get format inline
+
+        Returns:
+            Response with bitstreams list (_embedded.bitstreams or bitstreams)
+        """
+        params = {"embed": "format"} if embed_format else None
+        response = await self._request(
+            "GET", f"core/bundles/{bundle_uuid}/bitstreams", params=params
+        )
+        return response.json()
+
+    async def get_bitstream_format(self, bitstream_uuid: str) -> dict:
+        """
+        Get the format of a bitstream.
+
+        GET core/bitstreams/{uuid}/format. Returns format object (includes id).
+
+        Args:
+            bitstream_uuid: UUID of the bitstream
+
+        Returns:
+            Format object with id, shortDescription, mimetype, etc.
+        """
+        response = await self._request(
+            "GET", f"core/bitstreams/{bitstream_uuid}/format"
+        )
+        return response.json()
+
+    async def get_bitstream_formats(self, page: int = 0, size: int = 100) -> dict:
+        """
+        Get the list of bitstream formats from the registry.
+
+        GET core/bitstreamformats. Used to resolve e.g. PDF to a format id.
+        Paginated; use page/size to iterate if needed.
+
+        Args:
+            page: Page number (0-based)
+            size: Page size
+
+        Returns:
+            Response with _embedded.bitstreamformats or similar list
+        """
+        response = await self._request(
+            "GET",
+            "core/bitstreamformats",
+            params={"page": page, "size": size},
+        )
+        return response.json()
+
     # ========== Statistics ==========
     
     async def create_item_view(
@@ -867,6 +972,283 @@ class DSpaceClient:
         response = await self._request("GET", f"core/items/{uuid}")
         return response.json()
 
+    async def resolve_pdf_format_id(
+        self, override_format_id: Optional[int] = None
+    ) -> Optional[int]:
+        """
+        Resolve the bitstream format id for PDF from the registry.
+
+        Calls GET core/bitstreamformats and finds the format where shortDescription
+        or mimetype indicates PDF (e.g. "application/pdf"). If override_format_id
+        is set, returns that value without calling the API (useful when the
+        registry shape differs or PDF id is known to be e.g. 3).
+
+        Args:
+            override_format_id: If set, return this id and skip registry lookup
+
+        Returns:
+            Format id for PDF, or None if not found
+        """
+        if override_format_id is not None:
+            return override_format_id
+        data = await self.get_bitstream_formats(page=0, size=200)
+        formats = data.get("_embedded", {}).get("bitstreamformats", [])
+        if not formats and "bitstreamformats" in data:
+            formats = data["bitstreamformats"]
+        for fmt in formats:
+            desc = (fmt.get("shortDescription") or "").upper()
+            mime = (fmt.get("mimetype") or "").lower()
+            if "PDF" in desc or mime == "application/pdf":
+                return fmt.get("id")
+        return None
+
+    async def count_items_with_bitstream_format(
+        self,
+        format_id: int,
+        page_size: int = 100,
+        delay_between_pages: float = 1.0,
+        delay_between_items: float = 0.0,
+        progress_callback: Optional[Callable[[int, int, Optional[int]], None]] = None,
+        adaptive_delay: bool = False,
+        adaptive_delay_config: Optional[AdaptiveDelayConfig] = None,
+        debug_page_callback: Optional[
+            Callable[[int, float, float, Optional[float]], None]
+        ] = None,
+        cache: Optional[RestPDFCountCache] = None,
+        force_rerun: bool = False,
+    ) -> dict:
+        """
+        Count items that have at least one bitstream with the given format id.
+
+        Pages through discovery (UUIDs only), then for each item fetches only
+        bundles and bitstreams (with format). Does not load full item metadata.
+        Intended for moderate-sized repos (e.g. ~10k items); use delays to avoid
+        straining the server.
+
+        If cache is provided and force_rerun is False, items present in the cache
+        are skipped (no API calls); their cached has_pdf is used. Assumes items
+        are immutable after creation. Use force_rerun=True to re-check all items.
+
+        Args:
+            format_id: Bitstream format id (e.g. 3 for PDF in default DSpace)
+            page_size: Number of item UUIDs per discovery page (max 100)
+            delay_between_pages: Seconds to wait between discovery pages
+            delay_between_items: Seconds to wait between processing each item
+            cache: Optional RestPDFCountCache to skip already-known items
+            force_rerun: If True, ignore cache and re-fetch all items; cache is
+                still updated for future runs
+
+        Returns:
+            Dict with "count" (items with ≥1 bitstream of this format) and
+            "total_items_processed" (total items considered).
+        """
+        count = 0
+        total_processed = 0
+        page = 0
+        page_size = min(page_size, 100)
+        total_known: Optional[int] = None
+
+        delay_controller: Optional[AdaptiveDelayController] = None
+        if adaptive_delay:
+            cfg = adaptive_delay_config or AdaptiveDelayConfig()
+            # If caller explicitly set a delay_between_pages, treat it as initial
+            if delay_between_pages != 1.0:
+                cfg.initial_delay = delay_between_pages
+            delay_controller = AdaptiveDelayController(cfg)
+
+        while True:
+            # Inter-page delay
+            if page > 0:
+                if adaptive_delay and delay_controller is not None:
+                    d = delay_controller.get_delay()
+                    if d > 0:
+                        await asyncio.sleep(d)
+                elif delay_between_pages > 0:
+                    await asyncio.sleep(delay_between_pages)
+
+            page_start = time.perf_counter()
+            try:
+                results = await self.search_items(
+                    query="*",
+                    sort="dc.date.accessioned,desc",
+                    page=page,
+                    size=page_size,
+                )
+            except DSpaceAPIError as e:
+                if adaptive_delay and delay_controller is not None:
+                    page_duration = time.perf_counter() - page_start
+                    status = "rate_limited" if "429" in str(e) else "error"
+                    await delay_controller.record_result(page_duration, status=status)
+                raise
+
+            search_result = results.get("_embedded", {}).get("searchResult", {})
+            objects = search_result.get("_embedded", {}).get("objects", [])
+            if page == 0 and search_result and total_known is None:
+                page_info = search_result.get("page", {})
+                if isinstance(page_info, dict):
+                    total_known = page_info.get("totalElements")
+            if not objects:
+                page_duration = time.perf_counter() - page_start
+                current_delay = (
+                    delay_controller.current_delay
+                    if adaptive_delay and delay_controller is not None
+                    else delay_between_pages
+                )
+                if debug_page_callback:
+                    debug_page_callback(
+                        page, page_duration, float(current_delay), self.courtesy_delay
+                    )
+                if adaptive_delay and delay_controller is not None:
+                    await delay_controller.record_result(page_duration, status="ok")
+                break
+            for obj in objects:
+                indexable = obj.get("_embedded", {}).get("indexableObject", {})
+                item_uuid = indexable.get("uuid")
+                if not item_uuid:
+                    continue
+                if cache is not None and not force_rerun:
+                    cached_has_pdf = cache.get(item_uuid)
+                    if cached_has_pdf is not None:
+                        total_processed += 1
+                        if cached_has_pdf:
+                            count += 1
+                        if progress_callback:
+                            progress_callback(total_processed, count, total_known)
+                        continue
+                if delay_between_items > 0 and total_processed > 0:
+                    await asyncio.sleep(delay_between_items)
+                total_processed += 1
+                item_has_format = False
+                try:
+                    bundles_data = await self.get_item_bundles(item_uuid)
+                except DSpaceAPIError:
+                    continue
+                bundles = bundles_data.get("bundles", [])
+                if not bundles:
+                    bundles = bundles_data.get("_embedded", {}).get("bundles", [])
+                for bundle in bundles:
+                    if item_has_format:
+                        break
+                    bundle_uuid = bundle.get("uuid")
+                    if not bundle_uuid:
+                        continue
+                    try:
+                        bitstreams_data = await self.get_bundle_bitstreams(
+                            bundle_uuid, embed_format=True
+                        )
+                    except DSpaceAPIError:
+                        try:
+                            bitstreams_data = await self.get_bundle_bitstreams(
+                                bundle_uuid, embed_format=False
+                            )
+                        except DSpaceAPIError:
+                            continue
+                    bitstreams = bitstreams_data.get("_embedded", {}).get(
+                        "bitstreams", []
+                    )
+                    if not bitstreams:
+                        bitstreams = bitstreams_data.get("bitstreams", [])
+                    for bs in bitstreams:
+                        fmt = bs.get("_embedded", {}).get("format") or bs.get("format")
+                        if fmt is not None and fmt.get("id") == format_id:
+                            item_has_format = True
+                            break
+                    if item_has_format:
+                        break
+                    for bs in bitstreams:
+                        bs_uuid = bs.get("uuid")
+                        if not bs_uuid:
+                            continue
+                        try:
+                            fmt = await self.get_bitstream_format(bs_uuid)
+                            if fmt.get("id") == format_id:
+                                item_has_format = True
+                                break
+                        except DSpaceAPIError:
+                            pass
+                    if item_has_format:
+                        break
+                if item_has_format:
+                    count += 1
+                if cache is not None:
+                    cache.update(item_uuid, item_has_format)
+                if progress_callback:
+                    progress_callback(total_processed, count, total_known)
+            page_duration = time.perf_counter() - page_start
+            current_delay = (
+                delay_controller.current_delay
+                if adaptive_delay and delay_controller is not None
+                else delay_between_pages
+            )
+            if debug_page_callback:
+                debug_page_callback(
+                    page, page_duration, float(current_delay), self.courtesy_delay
+                )
+            if adaptive_delay and delay_controller is not None:
+                await delay_controller.record_result(page_duration, status="ok")
+            if len(objects) < page_size:
+                break
+            page += 1
+
+        return {"count": count, "total_items_processed": total_processed}
+
+    async def count_items_with_pdf_bitstream(
+        self,
+        pdf_format_id: Optional[int] = None,
+        page_size: int = 100,
+        delay_between_pages: float = 1.0,
+        delay_between_items: float = 0.0,
+        progress_callback: Optional[Callable[[int, int, Optional[int]], None]] = None,
+        adaptive_delay: bool = False,
+        adaptive_delay_config: Optional[AdaptiveDelayConfig] = None,
+        debug_page_callback: Optional[
+            Callable[[int, float, float, Optional[float]], None]
+        ] = None,
+        cache: Optional[RestPDFCountCache] = None,
+        force_rerun: bool = False,
+    ) -> dict:
+        """
+        Count items that have at least one PDF bitstream.
+
+        Resolves the PDF format id from the bitstream format registry (or uses
+        pdf_format_id if provided), then calls count_items_with_bitstream_format.
+
+        Args:
+            pdf_format_id: If set, use this as the PDF format id (e.g. 3); otherwise
+                resolve from GET core/bitstreamformats
+            page_size: Number of item UUIDs per discovery page
+            delay_between_pages: Seconds between discovery pages
+            delay_between_items: Seconds between items
+            cache: Optional RestPDFCountCache to skip already-known items
+            force_rerun: If True, ignore cache and re-check all items
+
+        Returns:
+            Dict with "count", "total_items_processed", and "pdf_format_id" (id used).
+        """
+        resolved_id = await self.resolve_pdf_format_id(
+            override_format_id=pdf_format_id
+        )
+        if resolved_id is None:
+            return {
+                "count": 0,
+                "total_items_processed": 0,
+                "pdf_format_id": None,
+            }
+        result = await self.count_items_with_bitstream_format(
+            format_id=resolved_id,
+            page_size=page_size,
+            delay_between_pages=delay_between_pages,
+            delay_between_items=delay_between_items,
+            progress_callback=progress_callback,
+            adaptive_delay=adaptive_delay,
+            adaptive_delay_config=adaptive_delay_config,
+            debug_page_callback=debug_page_callback,
+            cache=cache,
+            force_rerun=force_rerun,
+        )
+        result["pdf_format_id"] = resolved_id
+        return result
+
     async def patch_item(self, uuid: str, operations: list) -> dict:
         """
         Update item with JSON Patch operations (RFC 6902).
@@ -956,7 +1338,7 @@ class DSpaceClient:
         
         This method should be called after client initialization to ensure the server
         version matches the declared target versions. It will:
-        - Detect the server version from /api/config/properties
+        - Detect the server version (config/properties/dspace.version, then root API, then actuator/info)
         - Compare against target_versions
         - Raise ServerVersionMismatchError for major version mismatches (if raise_on_mismatch=True)
         - Print warnings for minor version differences
@@ -1008,66 +1390,136 @@ class DSpaceClient:
         console.print(f"[green]✓[/green]  Server version {server_version} is compatible with target version(s) {target_versions_str}")
         return None
     
+    def _normalize_version(self, version_str: Optional[str]) -> Optional[str]:
+        """Parse version string to major.minor (e.g. 9.0.1 -> 9.0). Returns None if invalid.
+
+        This is deliberately tolerant of prefixes/suffixes like ``\"DSpace 7.6\"`` by
+        extracting the first ``major.minor`` pattern it finds.
+        """
+        if not version_str or not isinstance(version_str, str):
+            return None
+
+        version_str = version_str.strip()
+
+        # First, try to extract a major.minor pattern from the string.
+        # Examples:
+        # - "DSpace 7.6" -> "7.6"
+        # - "7.6.1" -> "7.6"
+        # - "Version 9.0.1" -> "9.0"
+        match = re.search(r"(\d+)\.(\d+)", version_str)
+        if match:
+            try:
+                major, minor = int(match.group(1)), int(match.group(2))
+                return f"{major}.{minor}"
+            except ValueError:
+                # Regex guarantees digits, but be defensive
+                return f"{match.group(1)}.{match.group(2)}"
+
+        # Fallback: previous behavior for already clean strings or edge cases
+        parts = version_str.split(".")
+        if len(parts) >= 2:
+            try:
+                major, minor = int(parts[0]), int(parts[1])
+                return f"{major}.{minor}"
+            except ValueError:
+                return f"{parts[0]}.{parts[1]}" if parts[0] and parts[1] else None
+        return version_str if version_str else None
+
+    def _parse_version_from_json(self, data: dict) -> Optional[str]:
+        """Extract version from various JSON shapes (root API, actuator, etc.). Returns normalized version or None."""
+        if not data or not isinstance(data, dict):
+            return None
+        # Direct keys
+        for key in ("version", "dspaceVersion", "dspace_version"):
+            v = data.get(key)
+            if isinstance(v, str) and v:
+                return self._normalize_version(v)
+            if isinstance(v, dict) and "version" in v:
+                return self._normalize_version(str(v["version"]))
+        # Nested: dspace.version, info.build.version (actuator), config.version
+        dspace = data.get("dspace") or data.get("config") or {}
+        if isinstance(dspace, dict):
+            v = dspace.get("version")
+            if isinstance(v, str) and v:
+                return self._normalize_version(v)
+        info = data.get("info") or data.get("build") or {}
+        if isinstance(info, dict):
+            v = info.get("version")
+            if isinstance(v, str) and v:
+                return self._normalize_version(v)
+        return None
+
     async def detect_dspace_version(self) -> Optional[str]:
         """
-        Detect the actual DSpace server version from /api/config/properties.
-        
-        Returns:
-            DSpace version string (e.g., "7.6", "8.0", "9.1") or None if detection fails
+        Detect the actual DSpace server version.
+
+        Tries in order: (1) GET /api/config/properties/dspace.version (single-property,
+        per REST contract; main config/properties returns 405), (2) GET /server/api root
+        HAL, (3) GET /actuator/info. Returns major.minor (e.g. 7.6, 9.0) or None.
         """
+        headers = self._get_headers(include_csrf=False)
+        last_error: Optional[str] = None
+
+        # 1. Single-property endpoint (per docs/dspace-rest-api/7.6/configuration.md)
         try:
-            # Try to get version from config/properties endpoint
-            url = f"{self.base_url}/server/api/config/properties"
-            headers = self._get_headers(include_csrf=False)
-            
+            url = f"{self.base_url}/server/api/config/properties/dspace.version"
             response = await self.client.get(url, headers=headers)
-            
             if response.status_code == 200:
-                try:
-                    properties = response.json()
-                    version_str = properties.get("dspace.version")
-                    
-                    if version_str:
-                        # Parse and normalize version (handle patch versions like 9.0.1 -> 9.0)
-                        # DSpace versions are typically in format X.Y or X.Y.Z
-                        version_parts = version_str.split('.')
-                        if len(version_parts) >= 2:
-                            # Take only major.minor, ignore patch version
-                            normalized_version = f"{version_parts[0]}.{version_parts[1]}"
-                            return normalized_version
-                        else:
-                            console.print(f"[dim]Warning: Unexpected version format from server: {version_str}[/dim]")
-                            return version_str  # Return as-is if format is unexpected
-                    else:
-                        console.print(f"[dim]Warning: 'dspace.version' property not found in config/properties[/dim]")
-                        return None
-                except (ValueError, KeyError) as e:
-                    console.print(f"[dim]Warning: Could not parse version from config/properties: {e}[/dim]")
-                    return None
+                data = response.json()
+                values = data.get("values") if isinstance(data, dict) else None
+                if values and len(values) > 0 and values[0]:
+                    normalized = self._normalize_version(str(values[0]))
+                    if normalized:
+                        return normalized
             elif response.status_code == 401:
-                # Try unauthenticated access (some servers may allow this)
                 try:
                     async with httpx.AsyncClient(timeout=self.timeout) as unauthenticated_client:
-                        unauthenticated_response = await unauthenticated_client.get(url)
-                        if unauthenticated_response.status_code == 200:
-                            properties = unauthenticated_response.json()
-                            version_str = properties.get("dspace.version")
-                            if version_str:
-                                version_parts = version_str.split('.')
-                                if len(version_parts) >= 2:
-                                    return f"{version_parts[0]}.{version_parts[1]}"
-                                return version_str
+                        r = await unauthenticated_client.get(url)
+                        if r.status_code == 200:
+                            data = r.json()
+                            values = data.get("values") if isinstance(data, dict) else None
+                            if values and len(values) > 0 and values[0]:
+                                normalized = self._normalize_version(str(values[0]))
+                                if normalized:
+                                    return normalized
                 except Exception:
                     pass
-                console.print(f"[dim]Warning: Could not access config/properties (status: {response.status_code})[/dim]")
-                return None
-            else:
-                console.print(f"[dim]Warning: Could not access config/properties (status: {response.status_code})[/dim]")
-                return None
-                
+            last_error = f"config/properties/dspace.version (status: {response.status_code})"
         except Exception as e:
-            console.print(f"[dim]Warning: Could not detect DSpace version: {e}[/dim]")
-            return None
+            last_error = f"config/properties/dspace.version: {e}"
+
+        # 2. Root API (GET /server/api) – often exposes version in HAL
+        try:
+            root_url = f"{self.base_url}/server/api"
+            response = await self.client.get(root_url, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                normalized = self._parse_version_from_json(data)
+                if normalized:
+                    return normalized
+            if not last_error:
+                last_error = f"root API (status: {response.status_code})"
+        except Exception as e:
+            if not last_error:
+                last_error = f"root API: {e}"
+
+        # 3. Actuator info (admin-only on some setups)
+        try:
+            actuator_url = f"{self.base_url}/server/actuator/info"
+            response = await self.client.get(actuator_url, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                normalized = self._parse_version_from_json(data)
+                if normalized:
+                    return normalized
+            if not last_error:
+                last_error = f"actuator/info (status: {response.status_code})"
+        except Exception as e:
+            if not last_error:
+                last_error = f"actuator/info: {e}"
+
+        console.print(f"[dim]Warning: Could not detect server version ({last_error}). Version validation skipped.[/dim]")
+        return None
     
     async def get_item_submitter(self, item_uuid: str) -> Optional[dict]:
         """

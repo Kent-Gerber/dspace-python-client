@@ -6,7 +6,7 @@ A comprehensive Python client for the DSpace REST API with version-aware compati
 
 - **Version-first initialization** with automatic documentation fetching
 - **Pre-execution validation** for all API operations
-- **Multi-version compatibility** support (DSpace 7.x, 8.x, 9.x)
+- **Multi-version compatibility** support (DSpace 7.6, 8.x, 9.x; 7.6 REST contract in `docs/dspace-rest-api/7.6/`)
 - **Git-based documentation** management with auto-updates
 - **Rich console output** for beautiful user experience
 - **Batch operations** with adaptive concurrency control
@@ -204,6 +204,18 @@ await client.delete_item(uuid)
 # Bitstreams
 await client.upload_bitstream(bundle_uuid, filename, content, metadata=None)
 await client.delete_bitstream(uuid)
+await client.get_item_bundles(item_uuid)
+await client.get_bundle_bitstreams(bundle_uuid, embed_format=True)
+await client.get_bitstream_format(bitstream_uuid)
+await client.get_bitstream_formats(page=0, size=100)
+
+# Reporting: count items with at least one PDF bitstream
+result = await client.count_items_with_pdf_bitstream(
+    pdf_format_id=3,  # optional; resolved from registry if omitted
+    page_size=100,
+    delay_between_pages=1.0,
+)
+# result["count"], result["total_items_processed"], result["pdf_format_id"]
 
 # EPeople
 await client.create_eperson(email, first_name, last_name)
@@ -247,6 +259,56 @@ except DSpaceAPIError as e:
 except AuthenticationError as e:
     print(f"Authentication failed: {e}")
 ```
+
+### Counting items with PDF bitstreams (REST, includes non-public items)
+
+To report how many items have at least one bitstream in PDF format (equivalent to a DB count over items with PDF bitstreams), use the **REST API** with authentication so that **all items** (including non-public) are considered. The client pages through discovery (item UUIDs only), then for each item fetches only bundles and bitstreams (with format).
+
+**Caching and resuming:** Use `RestPDFCountCache` so that already-known items are skipped on subsequent runs (items are assumed immutable). Use `force_rerun=True` to re-check everything.
+
+**Slow-request logging:** To identify which endpoints are slow, set `slow_request_threshold_seconds` and `slow_request_callback` on the client; requests exceeding the threshold are also logged at WARNING and can be collected for analysis.
+
+```python
+from dspace_client import create_validated_client, RestPDFCountCache
+
+auth, client = await create_validated_client(base_url=..., username=..., password=...)
+
+cache = RestPDFCountCache(base_url=base_url)  # default dir: ~/.cache/dspace-rest-pdf
+cache.load()
+
+result = await client.count_items_with_pdf_bitstream(
+    page_size=100,
+    delay_between_pages=1.0,
+    cache=cache,
+    force_rerun=False,  # use cache; set True to re-check all
+)
+cache.save()
+print(f"Items with ≥1 PDF: {result['count']} (of {result['total_items_processed']} processed)")
+```
+
+To log and inspect slow requests, pass `slow_request_threshold_seconds` and `slow_request_callback` into `create_validated_client(..., **client_kwargs)`; the example script does this and prints a table of slow requests at the end.
+
+Example script: `examples/count_items_with_pdf_bitstream.py`. Set `DSPACE_REST_PDF_CACHE_DIR` to override the cache directory.
+
+### Counting items with PDF via OAI-PMH (no auth, cacheable)
+
+For large or slow repositories, you can count items with PDF using the **OAI-PMH** endpoint at `{base_url}/server/oai/request`. No authentication is required. The client harvests `ListRecords` with `metadataPrefix=oai_dc` and infers PDF from `<dc:format>application/pdf</dc:format>`. Results can be stored in a **persistent CSV cache** so resumed runs skip already-seen items; incremental harvest (from `last_until`) is supported.
+
+```python
+from dspace_client.oai import OAIClient, OAIPDFCountCache, iterate_oai_dc_records
+
+base_url = "https://your-dspace.edu"
+cache = OAIPDFCountCache(base_url=base_url)  # default: ~/.cache/dspace-oai-pdf
+cache.load()
+
+async with OAIClient(base_url=base_url) as client:
+    async for parsed in iterate_oai_dc_records(client, from_=cache.last_until):
+        cache.update(parsed["identifier"], parsed["datestamp"], parsed["has_pdf"])
+cache.save(last_until=max_datestamp)
+total, with_pdf = cache.totals()
+```
+
+Example script: `examples/count_items_with_pdf_bitstream_oai.py`. Set `DSPACE_OAI_CACHE_DIR` to override the cache directory.
 
 ## Configuration
 
