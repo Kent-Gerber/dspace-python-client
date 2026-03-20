@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **DSpaceAuthClient**: Proactive session refresh prefers JWT refresh (`POST /authn/login` with `Authorization: Bearer` + `X-XSRF-TOKEN`) before full CSRF + password login, avoiding fragile `GET /security/csrf` on long runs when proxies strip `DSPACE-XSRF-TOKEN`. `ensure_session` treats “no prior auth” as `_last_auth_time is None` (not falsy `0.0`).
+- **DSpaceAuthClient**: If `GET /security/csrf` omits the header, CSRF value may be taken from `DSPACE-XSRF-COOKIE` in the httpx jar.
+- **examples/link_author_authorities**: ORCID mode — parse checksum `X`, `www.orcid.org` URLs, and vocabulary metadata `person.identifier.orcid` / `dc.identifier.uri`; resolve via vocabulary `entryID`, hyphenated + compact filters, then first-four-digit pagination; fetch entry detail only when list metadata lacks ORCID; dim progress during broad scan.
+
 ### Added
+- **dspace_client.auth**: Failure-only structured logging (`WARNING` / optional `DEBUG` on `dspace_client.auth`) for CSRF, JWT refresh, login, and verify failures.
+- **tests**: `test_link_author_orcid_normalize.py`; auth tests for `refresh_jwt`, `ensure_session`, and CSRF cookie fallback.
+- **.gitignore**: ignore `link_author_authorities_*.log` and `link_author_authorities_state.jsonl`.
 - Initial release of DSpace Python client
 - Version-first initialization with automatic documentation fetching
 - Pre-execution validation for all API operations
@@ -16,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rich console output for beautiful user experience
 - Batch operations with adaptive concurrency control
 - Comprehensive error handling with actionable messages
+
+### Changed
+- **docs/API_GOTCHAS.md**: Notes on session refresh behavior and enabling auth diagnostics.
 
 ### Features
 - **DSpaceAuthClient**: Complete authentication flow (CSRF → Login → JWT)

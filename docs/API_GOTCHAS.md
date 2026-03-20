@@ -203,6 +203,15 @@ Authentication works identically across DSpace 7, 8, and 9:
 - CSRF tokens via `DSPACE-XSRF-COOKIE` cookie
 - Bearer token authentication for API calls
 
+**Long-running jobs and session refresh:** `DSpaceAuthClient.ensure_session()` extends sessions by calling `POST /api/authn/login` with the existing `Authorization: Bearer` and `X-XSRF-TOKEN` when possible, so routine refresh does not hit `GET /api/security/csrf` (which some reverse proxies mishandle). If that refresh fails, the client falls back to a full CSRF + password login.
+
+**Auth diagnostics (failure-only):** The `dspace_client.auth` logger emits **WARNING** (and **DEBUG** for extra detail) only when CSRF fetch, JWT refresh, login, or verification fails—successful auth is silent. To capture verbose traces for support, enable DEBUG for that logger only, for example:
+
+```python
+import logging
+logging.getLogger("dspace_client.auth").setLevel(logging.DEBUG)
+```
+
 ## References
 
 - [DSpace 7 RestContract](https://github.com/DSpace/RestContract/tree/dspace-7_x)

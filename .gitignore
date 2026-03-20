@@ -32,3 +32,7 @@ htmlcov/
 
 # Documentation
 docs/_build/
+
+# link_author_authorities example (timestamped logs + incremental state)
+link_author_authorities_*.log
+link_author_authorities_state.jsonl

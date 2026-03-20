@@ -1,5 +1,7 @@
 """Authentication client for DSpace REST API."""
 
+import inspect
+import logging
 import httpx
 import os
 import time
@@ -9,6 +11,21 @@ from rich.console import Console
 from .exceptions import AuthenticationError
 
 console = Console()
+logger = logging.getLogger(__name__)
+
+_CSRF_COOKIE_NAME = "DSPACE-XSRF-COOKIE"
+_BODY_PREVIEW_LEN = 200
+
+
+def _body_preview(text: object, limit: int = _BODY_PREVIEW_LEN) -> str:
+    if text is None or not isinstance(text, str):
+        return ""
+    if not text:
+        return ""
+    t = text.strip().replace("\n", " ")
+    if len(t) > limit:
+        return t[:limit] + "..."
+    return t
 
 
 class DSpaceAuthClient:
@@ -50,6 +67,80 @@ class DSpaceAuthClient:
         """
         if self.client is None:
             self.client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=True)
+    
+    def _csrf_token_from_cookie_jar(self) -> Optional[str]:
+        """Read CSRF value from jar when proxies strip DSPACE-XSRF-TOKEN header."""
+        if not self.client:
+            return None
+        try:
+            val = self.client.cookies.get(_CSRF_COOKIE_NAME)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if val is None or inspect.isawaitable(val) or not isinstance(val, str):
+            return None
+        return val or None
+    
+    def _apply_csrf_from_response(self, response: httpx.Response) -> None:
+        """Update stored CSRF if server sent a new dspace-xsrf-token (login / JWT refresh)."""
+        new_csrf = response.headers.get("dspace-xsrf-token")
+        if new_csrf and new_csrf != self.csrf_token:
+            self.csrf_token = new_csrf
+            self.csrf_cookie = new_csrf
+    
+    def _log_csrf_fetch_failure(
+        self,
+        response: httpx.Response,
+        method: str,
+        url: str,
+        cookie_in_jar: bool,
+    ) -> None:
+        logger.warning(
+            "get_csrf_token failed: method=%s url=%s status=%s content_type=%s "
+            "has_dspace_xsrf_token_header=%s dspace_xsrf_cookie_in_jar=%s body_preview=%r",
+            method,
+            url,
+            response.status_code,
+            response.headers.get("content-type", ""),
+            bool(response.headers.get("dspace-xsrf-token")),
+            cookie_in_jar,
+            _body_preview(response.text),
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("get_csrf_token response header keys: %s", list(response.headers.keys()))
+    
+    def _log_jwt_refresh_failure(self, response: httpx.Response) -> None:
+        logger.warning(
+            "refresh_jwt failed: status=%s content_type=%s has_dspace_xsrf_token=%s "
+            "has_authorization=%s body_preview=%r",
+            response.status_code,
+            response.headers.get("content-type", ""),
+            bool(response.headers.get("dspace-xsrf-token")),
+            bool(response.headers.get("Authorization")),
+            _body_preview(response.text),
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("refresh_jwt response header keys: %s", list(response.headers.keys()))
+    
+    def _log_login_failure(self, response: httpx.Response) -> None:
+        logger.warning(
+            "login failed: status=%s content_type=%s has_dspace_xsrf_token=%s "
+            "has_authorization=%s body_preview=%r",
+            response.status_code,
+            response.headers.get("content-type", ""),
+            bool(response.headers.get("dspace-xsrf-token")),
+            bool(response.headers.get("Authorization")),
+            _body_preview(response.text),
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("login response header keys: %s", list(response.headers.keys()))
+    
+    def _log_verify_failure(self, response: httpx.Response) -> None:
+        logger.warning(
+            "verify_authentication failed: status=%s content_type=%s body_preview=%r",
+            response.status_code,
+            response.headers.get("content-type", ""),
+            _body_preview(response.text),
+        )
     
     async def close(self):
         """Close the HTTP client."""
@@ -95,26 +186,76 @@ class DSpaceAuthClient:
             response = await self.client.head(csrf_url)
             csrf_token = response.headers.get("dspace-xsrf-token")
             if not csrf_token:
+                csrf_token = self._csrf_token_from_cookie_jar()
+            if not csrf_token:
                 response = await self.client.get(csrf_url)
                 csrf_token = response.headers.get("dspace-xsrf-token")
             if not csrf_token:
+                csrf_token = self._csrf_token_from_cookie_jar()
+            if not csrf_token:
+                self._log_csrf_fetch_failure(
+                    response,
+                    "GET",
+                    csrf_url,
+                    bool(self._csrf_token_from_cookie_jar()),
+                )
                 console.print("[red]Available headers:[/red]")
                 for key, value in response.headers.items():
                     console.print(f"  {key}: {value}")
                 raise AuthenticationError("CSRF token not found in response headers")
             
-            # Check if server set a cookie (it should be stored in client.cookies)
-            # console.print(f"[dim]  Cookies in client jar:[/dim]")
-            # for cookie in self.client.cookies.jar:
-            #     console.print(f"[dim]    {cookie.name} = {cookie.value[:20]}...[/dim]")
-            
             self.csrf_token = csrf_token
-            # Store for reference, but client will handle sending it
             self.csrf_cookie = csrf_token
             return csrf_token, csrf_token
         
         except httpx.RequestError as e:
             raise AuthenticationError(f"Failed to get CSRF token: {e}")
+    
+    async def refresh_jwt(self) -> str:
+        """
+        Refresh JWT using existing credentials (authentication.md: POST /authn/login
+        with Authorization Bearer + X-XSRF-TOKEN, no form body).
+        """
+        if not self.jwt_token or not self.csrf_token:
+            raise AuthenticationError("Cannot refresh JWT: missing jwt_token or csrf_token")
+        
+        await self._ensure_client()
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/server/api/authn/login",
+                headers={
+                    "Authorization": f"Bearer {self.jwt_token}",
+                    "X-XSRF-TOKEN": self.csrf_token,
+                },
+            )
+        except httpx.RequestError as e:
+            logger.warning("refresh_jwt request error: %s", e)
+            raise AuthenticationError(f"JWT refresh request failed: {e}") from e
+        
+        if response.status_code != 200:
+            self._log_jwt_refresh_failure(response)
+            raise AuthenticationError(
+                f"JWT refresh failed with status {response.status_code}: {response.text}"
+            )
+        
+        self._apply_csrf_from_response(response)
+        
+        auth_header = response.headers.get("Authorization")
+        if not auth_header:
+            self._log_jwt_refresh_failure(response)
+            console.print("[red]No Authorization header in JWT refresh response![/red]")
+            console.print("[red]Available headers:[/red]")
+            for key, value in response.headers.items():
+                console.print(f"  {key}: {value}")
+            raise AuthenticationError("JWT token not found in response after refresh")
+        
+        if not auth_header.startswith("Bearer "):
+            raise AuthenticationError(f"Invalid Authorization header format: {auth_header}")
+        
+        jwt_token = auth_header.replace("Bearer ", "")
+        self.jwt_token = jwt_token
+        self._last_auth_time = time.time()
+        return jwt_token
     
     async def login(self, username: str, password: str) -> str:
         """
@@ -141,16 +282,6 @@ class DSpaceAuthClient:
         try:
             await self._ensure_client()
             
-            # console.print(f"\n[dim]→ POST {self.base_url}/server/api/authn/login[/dim]")
-            # console.print(f"[dim]  Headers:[/dim]")
-            # console.print(f"[dim]    Content-Type: application/x-www-form-urlencoded[/dim]")
-            # console.print(f"[dim]    X-XSRF-TOKEN: {self.csrf_token[:20]}...[/dim]")
-            # console.print(f"[dim]  Cookies (auto-sent by client):[/dim]")
-            # for cookie in self.client.cookies.jar:
-            #     console.print(f"[dim]    {cookie.name} = {cookie.value[:20]}...[/dim]")
-            # console.print(f"[dim]  Body: user={username}&password=***[/dim]")
-            
-            # Let httpx automatically send cookies from previous requests
             response = await self.client.post(
                 f"{self.base_url}/server/api/authn/login",
                 data={
@@ -166,6 +297,7 @@ class DSpaceAuthClient:
             console.print(f"[dim]← Status: {response.status_code}[/dim]")
             
             if response.status_code != 200:
+                self._log_login_failure(response)
                 console.print(f"[red]Login failed![/red]")
                 console.print(f"[red]Response headers:[/red]")
                 for key, value in response.headers.items():
@@ -176,20 +308,11 @@ class DSpaceAuthClient:
                     f"Login failed with status {response.status_code}: {response.text}"
                 )
             
-            # ⚠️ CRITICAL: Check if CSRF token was refreshed
-            # DSpace often sends a NEW CSRF token after successful login.
-            # We MUST use this new token for all subsequent requests.
-            # Using the old token will result in 403 "Invalid CSRF token" errors.
-            # This was discovered through debugging - see HISTORY.md for details.
-            new_csrf_token = response.headers.get("dspace-xsrf-token")
-            if new_csrf_token and new_csrf_token != self.csrf_token:
-                # console.print(f"[dim]  CSRF Token refreshed: {new_csrf_token[:20]}... (was {self.csrf_token[:20]}...)[/dim]")
-                self.csrf_token = new_csrf_token
-                self.csrf_cookie = new_csrf_token
+            self._apply_csrf_from_response(response)
             
-            # Extract JWT from Authorization header
             auth_header = response.headers.get("Authorization")
             if not auth_header:
+                self._log_login_failure(response)
                 console.print("[red]No Authorization header in response![/red]")
                 console.print("[red]Available headers:[/red]")
                 for key, value in response.headers.items():
@@ -200,10 +323,8 @@ class DSpaceAuthClient:
                 raise AuthenticationError(f"Invalid Authorization header format: {auth_header}")
             
             jwt_token = auth_header.replace("Bearer ", "")
-            # console.print(f"[dim]  JWT Token: {jwt_token[:20]}...[/dim]")
             
             self.jwt_token = jwt_token
-            # Record successful auth time for proactive refresh logic
             self._last_auth_time = time.time()
             return jwt_token
         
@@ -226,10 +347,6 @@ class DSpaceAuthClient:
         try:
             await self._ensure_client()
             
-            # console.print(f"\n[dim]→ GET {self.base_url}/server/api/authn/status[/dim]")
-            # console.print(f"[dim]  Headers:[/dim]")
-            # console.print(f"[dim]    Authorization: Bearer {self.jwt_token[:20]}...[/dim]")
-            
             response = await self.client.get(
                 f"{self.base_url}/server/api/authn/status",
                 headers={
@@ -237,9 +354,8 @@ class DSpaceAuthClient:
                 },
             )
             
-            # console.print(f"[dim]← Status: {response.status_code}[/dim]")
-            
             if response.status_code != 200:
+                self._log_verify_failure(response)
                 console.print(f"[red]Verification failed![/red]")
                 console.print(f"[red]Response:[/red] {response.text[:500]}")
                 raise AuthenticationError(
@@ -249,11 +365,14 @@ class DSpaceAuthClient:
             status = response.json()
             
             if not status.get("authenticated"):
+                logger.warning(
+                    "verify_authentication: status 200 but authenticated=false payload_keys=%s",
+                    list(status.keys()) if isinstance(status, dict) else type(status).__name__,
+                )
                 console.print(f"[red]Status response indicates not authenticated:[/red]")
                 console.print(f"  {status}")
                 raise AuthenticationError("Authentication verification failed: not authenticated")
             
-            # console.print(f"[dim]  Authenticated: {status.get('authenticated')}[/dim]")
             return status
         
         except httpx.RequestError as e:
@@ -294,7 +413,7 @@ class DSpaceAuthClient:
         Returns:
             Current JWT token (possibly refreshed)
         """
-        if force or not self.jwt_token or not self._last_auth_time:
+        if force or not self.jwt_token or self._last_auth_time is None:
             jwt, _ = await self.authenticate(username, password)
             return jwt
         
@@ -305,6 +424,14 @@ class DSpaceAuthClient:
                 f"[dim]Refreshing DSpace session (age {int(age)}s ≥ "
                 f"max {int(self.max_session_age_seconds)}s)[/dim]"
             )
+            if self.csrf_token:
+                try:
+                    return await self.refresh_jwt()
+                except AuthenticationError as e:
+                    logger.warning(
+                        "JWT refresh failed; falling back to full authenticate: %s",
+                        e,
+                    )
             jwt, _ = await self.authenticate(username, password)
             return jwt
         

@@ -25,11 +25,13 @@ import asyncio
 import getpass
 import json
 import os
+import re
 import sys
 from datetime import datetime
 import time
 from typing import Awaitable, Callable, List, Optional, Tuple
 import unicodedata
+from urllib.parse import urlparse
 
 from rich.console import Console
 from rich.panel import Panel
@@ -47,6 +49,15 @@ AUTHOR_FIELD = "dc.contributor.author"
 CONFIDENCE_LINKED = 600
 
 console = Console()
+
+_ORCID_HYPHENATED = re.compile(
+    r"(\d{4}-\d{4}-\d{4}-\d{3}[\dXx])",
+    re.IGNORECASE,
+)
+_ORCID_SEGMENT = re.compile(
+    r"^\d{4}-\d{4}-\d{4}-\d{3}[\dXx]$",
+    re.IGNORECASE,
+)
 
 
 async def _ensure_fresh_session(
@@ -228,26 +239,60 @@ async def fetch_entry_detail(client: DSpaceClient, vocabulary_name: str, authori
     return await client.get_vocabulary_entry_detail(vocabulary_name, authority_uuid)
 
 
+def _orcid_candidate_from_plain_or_url(v: str) -> Optional[str]:
+    """Normalize a metadata value to an https://orcid.org/... URL when it is an ORCID."""
+    v = (v or "").strip()
+    if not v:
+        return None
+    low = v.lower()
+    if "orcid.org" in low:
+        if v.startswith("http"):
+            return v
+        return f"https://{v.lstrip('/')}" if not v.startswith("//") else f"https:{v}"
+    if _ORCID_SEGMENT.match(v) or _ORCID_HYPHENATED.search(v):
+        if not v.startswith("http"):
+            return f"https://orcid.org/{v}"
+        return v
+    # Plain compact 16-char (digits + optional trailing X), e.g. person.identifier.orcid
+    compact = "".join(ch.upper() for ch in v if ch.isdigit() or ch in "Xx")
+    if _valid_orcid_compact(compact):
+        hid = f"{compact[0:4]}-{compact[4:8]}-{compact[8:12]}-{compact[12:16]}"
+        return f"https://orcid.org/{hid}"
+    return None
+
+
 def extract_orcid_from_entry(entry: dict, detail: Optional[dict]) -> Optional[str]:
     """Get ORCID URL from vocabulary entry or its detail if available."""
-    # From entry metadata (some authorities store dc.identifier.orcid)
     meta = entry.get("metadata") or {}
-    for key in ("dc.identifier.orcid", "orcid"):
+    for key in (
+        "dc.identifier.orcid",
+        "orcid",
+        "person.identifier.orcid",
+    ):
         for lst in (meta.get(key) or []):
             if isinstance(lst, dict) and lst.get("value"):
-                v = lst["value"].strip()
-                if v and not v.startswith("http"):
-                    return f"https://orcid.org/{v}"
-                return v or None
-    # From detail otherInformation
+                out = _orcid_candidate_from_plain_or_url(lst["value"])
+                if out:
+                    return out
+    for key in ("dc.identifier.uri",):
+        for lst in (meta.get(key) or []):
+            if isinstance(lst, dict) and lst.get("value"):
+                out = _orcid_candidate_from_plain_or_url(lst["value"])
+                if out:
+                    return out
+
     if detail and isinstance(detail.get("otherInformation"), dict):
         oi = detail["otherInformation"]
-        for key in ("orcid", "dc.identifier.orcid"):
+        for key in ("orcid", "dc.identifier.orcid", "person.identifier.orcid"):
             if oi.get(key):
-                v = str(oi[key]).strip()
-                if v and not v.startswith("http"):
-                    return f"https://orcid.org/{v}"
-                return v or None
+                out = _orcid_candidate_from_plain_or_url(str(oi[key]))
+                if out:
+                    return out
+        for key in ("dc.identifier.uri",):
+            if oi.get(key):
+                out = _orcid_candidate_from_plain_or_url(str(oi[key]))
+                if out:
+                    return out
     return None
 
 
@@ -407,14 +452,94 @@ async def discover_item_uuids_newest_first(
     return uuids
 
 
-def _normalize_orcid_input(raw: str) -> str:
-    """Extract digits from ORCID input (handles URL or plain id)."""
+def _valid_orcid_compact(compact: str) -> bool:
+    """ORCID is 16 chars: 15 digits plus a final digit or checksum X."""
+    if len(compact) != 16:
+        return False
+    return all(c.isdigit() for c in compact[:15]) and (
+        compact[15].isdigit() or compact[15] == "X"
+    )
+
+
+def _compact_from_hyphenated(h: str) -> Optional[str]:
+    h = (h or "").strip()
+    if not _ORCID_SEGMENT.match(h):
+        return None
+    c = h.upper().replace("-", "")
+    return c if _valid_orcid_compact(c) else None
+
+
+def normalize_orcid_identifier(raw: str) -> Optional[str]:
+    """
+    Parse user ORCID input into canonical 16-character form (digits + optional trailing X).
+
+    Accepts hyphenated ids, 16-char compact form, and common profile URLs including
+    https://www.orcid.org/... (checksum letter X is valid per ORCID spec).
+    """
     s = (raw or "").strip()
-    # Remove common URL prefix
-    for prefix in ("https://orcid.org/", "http://orcid.org/", "orcid.org/"):
-        if s.lower().startswith(prefix):
-            s = s[len(prefix) :].strip()
-    return "".join(c for c in s if c.isdigit())
+    if not s:
+        return None
+
+    m = _ORCID_HYPHENATED.search(s)
+    if m:
+        c = _compact_from_hyphenated(m.group(1))
+        if c:
+            return c
+
+    url_candidate = s
+    if not re.match(r"^[a-z][a-z0-9+.-]*://", s, re.I):
+        low = s.lower()
+        if low.startswith("www.orcid.org/") or low.startswith("orcid.org/"):
+            url_candidate = "https://" + s
+
+    if "://" in url_candidate:
+        try:
+            pu = urlparse(url_candidate)
+            for seg in pu.path.split("/"):
+                seg = seg.split("?")[0].strip()
+                if not seg:
+                    continue
+                c = _compact_from_hyphenated(seg)
+                if c:
+                    return c
+        except Exception:
+            pass
+
+    lower = s.lower()
+    for prefix in (
+        "https://www.orcid.org/",
+        "http://www.orcid.org/",
+        "https://orcid.org/",
+        "http://orcid.org/",
+        "www.orcid.org/",
+        "orcid.org/",
+    ):
+        if lower.startswith(prefix):
+            rest = s[len(prefix) :].strip()
+            first = rest.split("/")[0].split("?")[0].strip()
+            if first:
+                c = _compact_from_hyphenated(first)
+                if c:
+                    return c
+                m2 = _ORCID_HYPHENATED.search(first)
+                if m2:
+                    c = _compact_from_hyphenated(m2.group(1))
+                    if c:
+                        return c
+            break
+
+    compact = "".join(ch.upper() for ch in s if ch.isdigit() or ch in "Xx")
+    if _valid_orcid_compact(compact):
+        return compact
+
+    return None
+
+
+def orcid_hyphenated_from_compact(compact: str) -> Optional[str]:
+    """Build 0000-0000-0000-000X from canonical 16-char ORCID."""
+    if not _valid_orcid_compact(compact):
+        return None
+    return f"{compact[0:4]}-{compact[4:8]}-{compact[8:12]}-{compact[12:16]}"
 
 
 async def resolve_authority_by_orcid(
@@ -429,15 +554,36 @@ async def resolve_authority_by_orcid(
 ) -> Optional[Tuple[str, str]]:
     """
     Resolve an ORCID id to a local authority (authority_uuid, display_name).
-    Tries filter_term with ORCID string first; then paginates vocabulary entries
-    and matches by ORCID in entry detail. Returns None if not found.
+
+    Uses vocabulary `filter` only to obtain candidates (Solr behavior varies by site):
+    tries entryID, hyphenated and compact filters, then first-4-digit pagination.
+    Always confirms with a full normalized ORCID match on entry metadata/detail.
     """
-    orcid_digits = _normalize_orcid_input(orcid_input)
-    if not orcid_digits or len(orcid_digits) != 16:
+    orcid_digits = normalize_orcid_identifier(orcid_input)
+    if not orcid_digits:
+        return None
+    orcid_hyphenated = orcid_hyphenated_from_compact(orcid_digits)
+
+    async def _try_match_in_entries(entries: List[dict]) -> Optional[Tuple[str, str]]:
+        for e in entries:
+            if not isinstance(e, dict) or not e.get("authority"):
+                continue
+            extracted = extract_orcid_from_entry(e, None)
+            detail: Optional[dict] = None
+            if not extracted:
+                detail = await fetch_entry_detail(
+                    client, vocabulary_name, e.get("authority", "")
+                )
+                extracted = extract_orcid_from_entry(e, detail)
+            ex_norm = normalize_orcid_identifier(extracted) if extracted else None
+            if ex_norm == orcid_digits:
+                name = (e.get("display") or e.get("value") or "").strip()
+                return (e["authority"], name)
         return None
 
-    # Try filter_term with ORCID (some vocabularies may support this)
-    try:
+    async def _fetch_entries_filtered(
+        filter_term: Optional[str], page: int
+    ) -> List[dict]:
         resp = await _throttled_call(
             auth,
             client,
@@ -446,54 +592,68 @@ async def resolve_authority_by_orcid(
             throttle,
             lambda: client.get_vocabulary_entries(
                 vocabulary_name,
-                filter_term=orcid_digits,
+                filter_term=filter_term,
                 exact=False,
+                page=page,
+                size=50,
+            ),
+        )
+        return (resp.get("_embedded") or {}).get("entries") or []
+
+    async def _fetch_entries_by_entry_id(entry_id: str) -> List[dict]:
+        resp = await _throttled_call(
+            auth,
+            client,
+            username,
+            password,
+            throttle,
+            lambda eid=entry_id: client.get_vocabulary_entries(
+                vocabulary_name,
+                filter_term=None,
+                entry_id=eid,
                 page=0,
                 size=50,
             ),
         )
-        entries = (resp.get("_embedded") or {}).get("entries") or []
-        for e in entries:
-            if not isinstance(e, dict) or not e.get("authority"):
-                continue
-            detail = await fetch_entry_detail(client, vocabulary_name, e.get("authority", ""))
-            extracted = extract_orcid_from_entry(e, detail)
-            if extracted and _normalize_orcid_input(extracted) == orcid_digits:
-                name = (e.get("display") or e.get("value") or "").strip()
-                return (e["authority"], name)
-    except Exception:
-        pass
+        return (resp.get("_embedded") or {}).get("entries") or []
 
-    # Fallback: paginate with broad filter (first 4 digits of ORCID)
+    # 1) Direct entryID (some sites key authority by ORCID string)
+    for eid in (x for x in (orcid_hyphenated, orcid_digits) if x):
+        try:
+            entries = await _fetch_entries_by_entry_id(eid)
+            hit = await _try_match_in_entries(entries)
+            if hit:
+                return hit
+        except Exception:
+            pass
+
+    # 2) Filter passes: hyphenated then compact (candidate generation only)
+    for ft in (x for x in (orcid_hyphenated, orcid_digits) if x):
+        try:
+            entries = await _fetch_entries_filtered(ft, 0)
+            hit = await _try_match_in_entries(entries)
+            if hit:
+                return hit
+        except Exception:
+            pass
+
+    # 3) Broad filter: first 4 digits, paginate
     for page in range(max_pages):
         try:
-            resp = await _throttled_call(
-                auth,
-                client,
-                username,
-                password,
-                throttle,
-                lambda p=page: client.get_vocabulary_entries(
-                    vocabulary_name,
-                    filter_term=orcid_digits[:4],
-                    exact=False,
-                    page=p,
-                    size=50,
-                ),
-            )
+            entries = await _fetch_entries_filtered(orcid_digits[:4], page)
         except Exception:
             break
-        entries = (resp.get("_embedded") or {}).get("entries") or []
         if not entries:
             break
-        for e in entries:
-            if not isinstance(e, dict) or not e.get("authority"):
-                continue
-            detail = await fetch_entry_detail(client, vocabulary_name, e.get("authority", ""))
-            extracted = extract_orcid_from_entry(e, detail)
-            if extracted and _normalize_orcid_input(extracted) == orcid_digits:
-                name = (e.get("display") or e.get("value") or "").strip()
-                return (e["authority"], name)
+        if page > 0:
+            console.print(
+                f"[dim]ORCID resolve: scanning vocabulary page {page + 1}/{max_pages} "
+                f"(filter={orcid_digits[:4]!r})…[/dim]"
+            )
+        hit = await _try_match_in_entries(entries)
+        if hit:
+            return hit
+
     return None
 
 
@@ -1105,6 +1265,12 @@ async def main() -> None:
             ).strip()
             if not orcid_input:
                 console.print("[yellow]No ORCID provided; skipping.[/yellow]")
+            elif not normalize_orcid_identifier(orcid_input):
+                console.print(
+                    "[yellow]Could not parse a valid ORCID. Use hyphenated form "
+                    "(e.g. 0000-0002-1825-0097; the last character may be X), "
+                    "or a profile URL such as https://orcid.org/… or https://www.orcid.org/…[/yellow]"
+                )
             else:
                 console.print("[dim]Resolving ORCID to local authority...[/dim]")
                 resolved = await resolve_authority_by_orcid(
@@ -1167,26 +1333,32 @@ async def main() -> None:
                 ).strip()
                 target_authority: Optional[Tuple[str, str]] = None
                 if orcid_opt:
-                    console.print("[dim]Resolving ORCID to local authority...[/dim]")
-                    resolved = await resolve_authority_by_orcid(
-                        client,
-                        vocabulary_name,
-                        orcid_opt,
-                        auth,
-                        username,
-                        password,
-                        throttle,
-                    )
-                    if resolved:
-                        target_authority = resolved
+                    if not normalize_orcid_identifier(orcid_opt):
                         console.print(
-                            f"[green]Will link to:[/green] {target_authority[1]!r} "
-                            f"(authority={target_authority[0]})"
+                            "[yellow]Could not parse that ORCID; skipping optional authority link. "
+                            "Use hyphenated id or an orcid.org / www.orcid.org profile URL.[/yellow]"
                         )
                     else:
-                        console.print(
-                            "[yellow]No local authority for that ORCID; will match from vocabulary per author.[/yellow]"
+                        console.print("[dim]Resolving ORCID to local authority...[/dim]")
+                        resolved = await resolve_authority_by_orcid(
+                            client,
+                            vocabulary_name,
+                            orcid_opt,
+                            auth,
+                            username,
+                            password,
+                            throttle,
                         )
+                        if resolved:
+                            target_authority = resolved
+                            console.print(
+                                f"[green]Will link to:[/green] {target_authority[1]!r} "
+                                f"(authority={target_authority[0]})"
+                            )
+                        else:
+                            console.print(
+                                "[yellow]No local authority for that ORCID; will match from vocabulary per author.[/yellow]"
+                            )
 
                 console.print("[cyan]Discovering items by author name...[/cyan]")
                 uuids = await discover_item_uuids_by_author(

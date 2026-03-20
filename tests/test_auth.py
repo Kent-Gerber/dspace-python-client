@@ -1,7 +1,7 @@
 """Tests for authentication client."""
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
 from dspace_client import DSpaceAuthClient
@@ -56,6 +56,8 @@ class TestDSpaceAuthClient:
         
         # Mock the client and response
         mock_client = AsyncMock()
+        mock_client.cookies = MagicMock()
+        mock_client.cookies.get.return_value = None
         mock_response = AsyncMock()
         mock_response.headers = {"dspace-xsrf-token": "test-csrf-token"}
         mock_client.head.return_value = mock_response
@@ -75,8 +77,11 @@ class TestDSpaceAuthClient:
         
         # Mock the client: HEAD and GET both return no token (fallback also fails)
         mock_client = AsyncMock()
+        mock_client.cookies = MagicMock()
+        mock_client.cookies.get.return_value = None
         mock_response = AsyncMock()
         mock_response.headers = {}
+        mock_response.text = ""
         mock_client.head.return_value = mock_response
         mock_client.get.return_value = mock_response
         auth.client = mock_client
@@ -90,6 +95,8 @@ class TestDSpaceAuthClient:
         auth = DSpaceAuthClient("https://demo.dspace.org")
         
         mock_client = AsyncMock()
+        mock_client.cookies = MagicMock()
+        mock_client.cookies.get.return_value = None
         head_response = AsyncMock()
         head_response.headers = {}  # No token on HEAD
         get_response = AsyncMock()
@@ -104,6 +111,124 @@ class TestDSpaceAuthClient:
         assert cookie == "token-from-get"
         mock_client.head.assert_called_once()
         mock_client.get.assert_called_once()
+    
+    @pytest.mark.asyncio
+    async def test_get_csrf_token_cookie_jar_fallback(self):
+        """Use DSPACE-XSRF-COOKIE from jar when response omits dspace-xsrf-token header."""
+        auth = DSpaceAuthClient("https://demo.dspace.org")
+        mock_client = AsyncMock()
+        mock_cookies = MagicMock()
+        mock_cookies.get.side_effect = [None, "token-from-jar"]
+        mock_client.cookies = mock_cookies
+        mock_response = AsyncMock()
+        mock_response.headers = {}
+        mock_response.text = ""
+        mock_client.head.return_value = mock_response
+        mock_client.get.return_value = mock_response
+        auth.client = mock_client
+        
+        token, cookie = await auth.get_csrf_token()
+        
+        assert token == "token-from-jar"
+        assert cookie == "token-from-jar"
+    
+    @pytest.mark.asyncio
+    async def test_refresh_jwt_success(self):
+        """JWT refresh POST returns new bearer token."""
+        auth = DSpaceAuthClient("https://demo.dspace.org")
+        auth.jwt_token = "old-jwt"
+        auth.csrf_token = "csrf-val"
+        mock_client = AsyncMock()
+        mock_client.cookies = MagicMock()
+        mock_client.cookies.get.return_value = None
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"Authorization": "Bearer refreshed-jwt"}
+        mock_response.text = ""
+        mock_client.post.return_value = mock_response
+        auth.client = mock_client
+        
+        jwt = await auth.refresh_jwt()
+        
+        assert jwt == "refreshed-jwt"
+        assert auth.jwt_token == "refreshed-jwt"
+        mock_client.post.assert_called_once()
+        args, kwargs = mock_client.post.call_args
+        assert "authn/login" in args[0]
+        assert kwargs["headers"]["Authorization"] == "Bearer old-jwt"
+        assert kwargs["headers"]["X-XSRF-TOKEN"] == "csrf-val"
+        assert "data" not in kwargs and not kwargs.get("data")
+    
+    @pytest.mark.asyncio
+    async def test_refresh_jwt_requires_tokens(self):
+        auth = DSpaceAuthClient("https://demo.dspace.org")
+        auth.jwt_token = None
+        auth.csrf_token = "c"
+        with pytest.raises(AuthenticationError, match="missing jwt_token"):
+            await auth.refresh_jwt()
+    
+    @pytest.mark.asyncio
+    async def test_refresh_jwt_non_200_raises(self):
+        auth = DSpaceAuthClient("https://demo.dspace.org")
+        auth.jwt_token = "j"
+        auth.csrf_token = "c"
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 403
+        mock_response.headers = {}
+        mock_response.text = "forbidden"
+        mock_client.post.return_value = mock_response
+        auth.client = mock_client
+        
+        with pytest.raises(AuthenticationError, match="JWT refresh failed"):
+            await auth.refresh_jwt()
+    
+    @pytest.mark.asyncio
+    async def test_ensure_session_stale_uses_refresh_jwt(self):
+        auth = DSpaceAuthClient("https://demo.dspace.org")
+        auth.jwt_token = "old"
+        auth.csrf_token = "csrf"
+        auth._last_auth_time = 0.0
+        auth.max_session_age_seconds = 60.0
+        
+        with patch.object(auth, "authenticate", new_callable=AsyncMock) as mock_auth, \
+             patch.object(auth, "refresh_jwt", new_callable=AsyncMock) as mock_refresh:
+            mock_refresh.return_value = "refreshed"
+            jwt = await auth.ensure_session("user", "pass")
+            assert jwt == "refreshed"
+            mock_refresh.assert_called_once()
+            mock_auth.assert_not_called()
+    
+    @pytest.mark.asyncio
+    async def test_ensure_session_refresh_failure_falls_back_to_authenticate(self):
+        auth = DSpaceAuthClient("https://demo.dspace.org")
+        auth.jwt_token = "old"
+        auth.csrf_token = "csrf"
+        auth._last_auth_time = 0.0
+        auth.max_session_age_seconds = 60.0
+        
+        with patch.object(auth, "authenticate", new_callable=AsyncMock) as mock_auth, \
+             patch.object(auth, "refresh_jwt", new_callable=AsyncMock) as mock_refresh:
+            mock_refresh.side_effect = AuthenticationError("refresh failed")
+            mock_auth.return_value = ("from-full-auth", {})
+            jwt = await auth.ensure_session("user", "pass")
+            assert jwt == "from-full-auth"
+            mock_refresh.assert_called_once()
+            mock_auth.assert_called_once_with("user", "pass")
+    
+    @pytest.mark.asyncio
+    async def test_ensure_session_stale_without_csrf_skips_refresh(self):
+        auth = DSpaceAuthClient("https://demo.dspace.org")
+        auth.jwt_token = "old"
+        auth.csrf_token = None
+        auth._last_auth_time = 0.0
+        auth.max_session_age_seconds = 60.0
+        
+        with patch.object(auth, "authenticate", new_callable=AsyncMock) as mock_auth:
+            mock_auth.return_value = ("full", {})
+            jwt = await auth.ensure_session("user", "pass")
+            assert jwt == "full"
+            mock_auth.assert_called_once_with("user", "pass")
     
     @pytest.mark.asyncio
     async def test_login_success(self):
