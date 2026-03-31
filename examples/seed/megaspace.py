@@ -935,11 +935,13 @@ async def main_async(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
-def _at_least_one(value: str) -> int:
+def _at_least_two(value: str) -> int:
     n = int(value)
-    if n < 1:
-        msg = "must be >= 1"
-        raise argparse.ArgumentTypeError(msg)
+    if n < 2:
+        raise argparse.ArgumentTypeError(
+            "MegaSpace requires at least 2 collections (mega-metadata and mega-bitstreams stress items "
+            "use different owning collections; regular batch round-robins across collections)."
+        )
     return n
 
 
@@ -949,9 +951,9 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=42, help="RNG seed for factory")
     p.add_argument(
         "--collections",
-        type=_at_least_one,
+        type=_at_least_two,
         default=2,
-        help="Number of collections (default: 2)",
+        help="Number of collections (minimum 2; default 2). Required for the full scenario.",
     )
     p.add_argument(
         "--items-per-collection",

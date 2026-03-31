@@ -23,6 +23,10 @@ pip install -e ".[examples]"
 | `minispace.py` | One community → collection → item → PDF bitstream; optional delete |
 | `megaspace.py` | Groups, EPeople, policies, batch items, statistics; optional cleanup |
 
+## MegaSpace: minimum collections
+
+**`--collections` must be at least 2.** MegaSpace is built around two collections (e.g. mega-metadata vs mega-bitstreams owning collections, and round-robin batch placement). If you pass **`--collections 1`**, the script exits immediately with an error before the interactive prompts.
+
 ## Login and version check
 
 Login is the same in both projects: CSRF → `POST /authn/login` → `GET /authn/status`.

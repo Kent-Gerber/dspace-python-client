@@ -189,8 +189,8 @@ pip install -e ".[examples]"
 
 Inspired by the **dspace-seed** workflow (bundled YAML, no `dspace_seed` package at runtime—only `dspace_client`):
 
-- **`seed/minispace.py`** - Preview, themed content from `seed/seedpacks/default.yml`, optional cascade delete
-- **`seed/megaspace.py`** - Groups, EPeople, collection READ groups, stress items, batch import, view events, optional cleanup
+- **`seed/minispace.py`** — One community → collection → item → bitstream; declares **DSpace 9.0**; **`verify_server_version`** after login **by default** (use **`--skip-version-check`** to skip); optional cascade delete.
+- **`seed/megaspace.py`** — Larger scenario: groups, EPeople, collection READ groups, **mega-metadata** and **mega-bitstreams** stress items, adaptive **`BatchItemCreator`** batch import (the library supports an optional **`on_metrics_sample`** callback on **`create_items_batch`** for time-series metrics), view events, optional cleanup. Requires **at least `--collections 2`** (validated at startup). **MegaSpace** also supports courtesy pacing, slow-request reporting, and optional **JSON/Markdown** diagnostics export — see **`examples/seed/README.md`**.
 
 The large file **`examples/seed/seedpacks/default.yml`** is copied from dspace-seed; sync it manually if the upstream pack changes.
 
@@ -200,7 +200,7 @@ The large file **`examples/seed/seedpacks/default.yml`** is copied from dspace-s
 
 - **`DSpaceAuthClient`** - Authentication and session management
 - **`DSpaceClient`** - Main API client with version validation
-- **`BatchItemCreator`** - High-performance bulk operations
+- **`BatchItemCreator`** - High-performance bulk operations; **`create_items_batch`** accepts an optional **`on_metrics_sample`** callback (invoked with **`PerformanceMetrics`** when progress is logged, every 50 items and at completion) for benchmarks and degradation analysis
 - **`ConcurrencyController`** - Adaptive concurrency control
 
 ### Key Methods

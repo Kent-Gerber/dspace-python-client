@@ -159,7 +159,8 @@ When you specify multiple versions (e.g., `["8.0", "9.0"]`), the server must mat
 ## Next Steps
 
 - **Examples**: See `examples/` directory for more complex scenarios
-- **Batch Operations**: Use `BatchItemCreator` for high-performance bulk imports
+- **Seed examples** (`examples/seed/`): dspace-seed–style **MiniSpace** and **MegaSpace** scenarios (install optional deps: `pip install -e ".[examples]"`). They declare **`TARGET_VERSIONS = ["9.0"]`** and run **`verify_server_version`** by default (use **`--skip-version-check`** to skip). **MegaSpace** requires **`--collections` ≥ 2** (fail-fast at startup). Details: `examples/seed/README.md`.
+- **Batch Operations**: Use `BatchItemCreator` for high-performance bulk imports (optional **`on_metrics_sample`** on **`create_items_batch`** for timing samples)
 - **Error Handling**: Learn about comprehensive error handling
 - **Documentation**: Read `docs/API_GOTCHAS.md` for critical DSpace quirks
 
