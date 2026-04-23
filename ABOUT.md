@@ -1,5 +1,19 @@
 # About dspace-python-client
 
+## Table of contents
+
+- [Introduction](#introduction)
+- [Main reasons this tool exists](#main-reasons-this-tool-exists)
+  - [1. Help Atmire SaaS clients despite the limitation that we cannot customize the DSpace code for clients in SaaS](#1-help-atmire-saas-clients-despite-the-limitation-that-we-cannot-customize-the-dspace-code-for-clients-in-saas)
+  - [2. Support DSpace Open Source development](#2-support-dspace-open-source-development)
+- [Installation & other technical documentation](#installation--other-technical-documentation)
+- [FAQ](#faq)
+  - [What categories of problems can `dspace-python-client` be used for?](#what-categories-of-problems-can-dspace-python-client-be-used-for)
+  - [Why Python and not Java (or another toolset)?](#why-python-and-not-java-or-another-toolset)
+  - [`dspace-seed`: instead of generating all this content, wouldn't it be better to share a big DB or assetstore that people can just deploy?](#dspace-seed-instead-of-generating-all-this-content-wouldnt-it-be-better-to-share-a-big-db-or-assetstore-that-people-can-just-deploy)
+
+---
+
 ## Introduction
 
 `dspace-python-client` is a tool available in Atmire's git at
