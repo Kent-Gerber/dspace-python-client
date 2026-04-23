@@ -36,6 +36,9 @@ docs/_build/
 # link_author_authorities example (timestamped logs + incremental state)
 link_author_authorities_*.log
 link_author_authorities_state.jsonl
+link_author_authorities_state_*.jsonl
+link_author_authorities_repo_checkpoint.json
+link_author_authorities_repo_checkpoint_*.json
 
 # full-text-finder example (timestamped audit logs)
 full_text_finder_*.log

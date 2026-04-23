@@ -384,14 +384,76 @@ def _all_metadata_values(metadata: dict, key: str) -> List[str]:
 
 STATE_ENV_VAR = "LINK_AUTHOR_STATE_FILE"
 DEFAULT_STATE_FILENAME = "link_author_authorities_state.jsonl"
+CHECKPOINT_ENV_VAR = "LINK_AUTHOR_REPO_CHECKPOINT_FILE"
+DEFAULT_CHECKPOINT_FILENAME = "link_author_authorities_repo_checkpoint.json"
+AUTO_CHUNK_THRESHOLD_ENV_VAR = "LINK_AUTHOR_AUTO_CHUNK_THRESHOLD"
+DEFAULT_AUTO_CHUNK_THRESHOLD = 2000
+DEFAULT_AUTO_CHUNK_SIZE = 1000
 
 
-def _get_state_path(log_dir: str) -> str:
+def _repo_key_from_base_url(base_url: str) -> str:
+    """Build a filesystem-safe repository key from the DSpace base URL host."""
+    host = (urlparse(base_url).hostname or "").strip().lower()
+    if not host:
+        return "unknown-host"
+    # Keep simple and deterministic; replace non-safe chars with underscore.
+    return re.sub(r"[^a-z0-9.-]+", "_", host)
+
+
+def _get_state_path(log_dir: str, base_url: str) -> str:
     """Compute path for the incremental state file."""
     override = os.environ.get(STATE_ENV_VAR)
     if override:
         return override
-    return os.path.join(log_dir, DEFAULT_STATE_FILENAME)
+    repo_key = _repo_key_from_base_url(base_url)
+    return os.path.join(
+        log_dir, f"link_author_authorities_state_{repo_key}.jsonl"
+    )
+
+
+def _get_checkpoint_path(log_dir: str, base_url: str) -> str:
+    """Compute path for repository-mode pagination checkpoint file."""
+    override = os.environ.get(CHECKPOINT_ENV_VAR)
+    if override:
+        return override
+    repo_key = _repo_key_from_base_url(base_url)
+    return os.path.join(
+        log_dir, f"link_author_authorities_repo_checkpoint_{repo_key}.json"
+    )
+
+
+def _load_repo_checkpoint(path: str) -> dict:
+    """Load repository-mode checkpoint from disk (best effort)."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        return {}
+    return {}
+
+
+def _save_repo_checkpoint(path: str, data: dict) -> None:
+    """Persist repository-mode checkpoint atomically (best effort)."""
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except OSError:
+        return
+
+
+def _clear_repo_checkpoint(path: str) -> None:
+    """Remove repository-mode checkpoint when a full pass completes."""
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        return
 
 
 def _load_attempt_state(path: str) -> dict[str, datetime]:
@@ -501,6 +563,48 @@ async def discover_item_uuids_newest_first(
             break
         page += 1
     return uuids
+
+
+async def _fetch_discovery_page_item_uuids(
+    auth: DSpaceAuthClient,
+    client: DSpaceClient,
+    username: str,
+    password: str,
+    throttle: ThrottleController,
+    page: int,
+    page_size: int = 100,
+) -> Tuple[List[str], Optional[int]]:
+    """Fetch one discovery page and return (uuids, totalElements if present)."""
+    results = await _throttled_call(
+        auth,
+        client,
+        username,
+        password,
+        throttle,
+        lambda: client.search_items(
+            query="*",
+            sort="dc.date.accessioned,desc",
+            page=page,
+            size=page_size,
+        ),
+    )
+    emb = results.get("_embedded") or {}
+    search_result = emb.get("searchResult") or emb.get("searchResults") or {}
+    objects = (search_result.get("_embedded") or {}).get("objects", [])
+    page_info = search_result.get("page") or {}
+    total_elements = None
+    if isinstance(page_info, dict):
+        total_val = page_info.get("totalElements")
+        if isinstance(total_val, int):
+            total_elements = total_val
+
+    uuids: List[str] = []
+    for obj in objects:
+        indexable = (obj.get("_embedded") or {}).get("indexableObject", {})
+        uuid_val = indexable.get("uuid")
+        if uuid_val:
+            uuids.append(uuid_val)
+    return uuids, total_elements
 
 
 def _valid_orcid_compact(compact: str) -> bool:
@@ -1226,6 +1330,8 @@ async def main() -> None:
 
     run_mode = "force"
     min_age_days: Optional[int] = None
+    repository_resume = False
+    max_items_this_run: Optional[int] = None
     if run_mode_key == "repository":
         mode_input = console.input(
             "[bold cyan]Run mode[/bold cyan] "
@@ -1247,6 +1353,23 @@ async def main() -> None:
             run_mode = "new"
             min_age_days = None
 
+        resume_input = console.input(
+            "[bold cyan]Resume from previous repository checkpoint?[/bold cyan] "
+            "[dim](y/n, press Enter for y):[/dim] "
+        ).strip().lower()
+        repository_resume = resume_input not in ("n", "no")
+
+        max_items_input = console.input(
+            f"[bold cyan]Max items to process in this run[/bold cyan] "
+            f"[dim](press Enter for auto: {DEFAULT_AUTO_CHUNK_SIZE} when repo is large):[/dim] "
+        ).strip()
+        if max_items_input:
+            try:
+                parsed = int(max_items_input)
+                max_items_this_run = parsed if parsed > 0 else None
+            except ValueError:
+                max_items_this_run = None
+
     # --- Log file ---
     log_dir = os.environ.get("LINK_AUTHOR_LOG_DIR", ".")
     log_filename = datetime.now().strftime("link_author_authorities_%Y-%m-%d_%H-%M-%S.log")
@@ -1260,8 +1383,9 @@ async def main() -> None:
         console.print(f"[dim]Log file: {log_path}[/dim]")
 
     # --- Incremental state (per item UUID) ---
-    state_path = _get_state_path(log_dir)
+    state_path = _get_state_path(log_dir, base_url)
     attempt_state = _load_attempt_state(state_path)
+    checkpoint_path = _get_checkpoint_path(log_dir, base_url)
     now = datetime.now()
 
     total_linked = 0
@@ -1299,37 +1423,136 @@ async def main() -> None:
                 items_processed = 1
 
         elif run_mode_key == "repository":
-            console.print("[cyan]Discovering all items (newest first)...[/cyan]")
-            uuids = await discover_item_uuids_newest_first(
-                auth, client, username, password, throttle
-            )
-            console.print(f"[cyan]Found {len(uuids)} item(s). Processing each.[/cyan]")
-            for i, uuid in enumerate(uuids, 1):
-                if not _should_process_uuid(uuid, run_mode, attempt_state, now, min_age_days):
+            checkpoint = _load_repo_checkpoint(checkpoint_path) if repository_resume else {}
+            start_page = 0
+            if repository_resume:
+                start_page = int(checkpoint.get("next_page", 0) or 0)
+                if start_page > 0:
                     console.print(
-                        f"[dim]Item {i}/{len(uuids)}: {uuid} – skipped by incremental run mode.[/dim]"
+                        f"[dim]Resuming repository scan from page {start_page} "
+                        f"(checkpoint: {checkpoint_path}).[/dim]"
                     )
-                    continue
+            else:
+                _clear_repo_checkpoint(checkpoint_path)
 
-                console.print(f"[dim]Item {i}/{len(uuids)}: {uuid}[/dim]")
-                linked, skipped, no_match = await process_item(
-                    auth,
-                    client,
-                    username,
-                    password,
-                    throttle,
-                    uuid,
-                    vocabulary_name,
-                    auto_link_single,
-                    use_fuzzy,
-                    log_file,
+            auto_chunk_threshold = DEFAULT_AUTO_CHUNK_THRESHOLD
+            try:
+                auto_chunk_threshold = int(
+                    os.environ.get(
+                        AUTO_CHUNK_THRESHOLD_ENV_VAR,
+                        str(DEFAULT_AUTO_CHUNK_THRESHOLD),
+                    )
                 )
-                total_linked += linked
-                total_skipped += skipped
-                total_no_match += no_match
-                items_processed += 1
-                attempt_state[uuid] = now
-                _append_attempt_state(state_path, uuid, now)
+            except ValueError:
+                auto_chunk_threshold = DEFAULT_AUTO_CHUNK_THRESHOLD
+
+            page_size = 100
+            page = start_page
+            global_seen = 0
+            discovered_total: Optional[int] = None
+            hit_run_limit = False
+
+            while True:
+                try:
+                    page_uuids, total_elements = await _fetch_discovery_page_item_uuids(
+                        auth,
+                        client,
+                        username,
+                        password,
+                        throttle,
+                        page=page,
+                        page_size=page_size,
+                    )
+                except Exception as e:
+                    console.print(
+                        f"[red]Repository discovery failed at page {page}: {e}[/red]"
+                    )
+                    _log(
+                        log_file,
+                        f"ERROR repository_discovery_failed page={page} error={e!r}",
+                    )
+                    checkpoint_payload = {
+                        "next_page": page,
+                        "updated_at": datetime.now().isoformat(),
+                        "run_mode": run_mode,
+                    }
+                    if discovered_total is not None:
+                        checkpoint_payload["total_elements"] = discovered_total
+                    _save_repo_checkpoint(checkpoint_path, checkpoint_payload)
+                    break
+
+                if discovered_total is None and total_elements is not None:
+                    discovered_total = total_elements
+                    console.print(
+                        f"[cyan]Repository reports ~{discovered_total} item(s) total.[/cyan]"
+                    )
+                    if max_items_this_run is None and discovered_total >= auto_chunk_threshold:
+                        max_items_this_run = DEFAULT_AUTO_CHUNK_SIZE
+                        console.print(
+                            "[yellow]Large repository detected; enabling chunked run "
+                            f"({max_items_this_run} items max this run).[/yellow]"
+                        )
+
+                if not page_uuids:
+                    console.print("[green]Repository scan complete.[/green]")
+                    _clear_repo_checkpoint(checkpoint_path)
+                    break
+
+                for uuid in page_uuids:
+                    global_seen += 1
+                    if not _should_process_uuid(
+                        uuid, run_mode, attempt_state, now, min_age_days
+                    ):
+                        console.print(
+                            f"[dim]Item {global_seen}: {uuid} – skipped by incremental run mode.[/dim]"
+                        )
+                        continue
+
+                    console.print(f"[dim]Item {global_seen}: {uuid}[/dim]")
+                    linked, skipped, no_match = await process_item(
+                        auth,
+                        client,
+                        username,
+                        password,
+                        throttle,
+                        uuid,
+                        vocabulary_name,
+                        auto_link_single,
+                        use_fuzzy,
+                        log_file,
+                    )
+                    total_linked += linked
+                    total_skipped += skipped
+                    total_no_match += no_match
+                    items_processed += 1
+                    attempt_state[uuid] = now
+                    _append_attempt_state(state_path, uuid, now)
+
+                    if (
+                        max_items_this_run is not None
+                        and items_processed >= max_items_this_run
+                    ):
+                        hit_run_limit = True
+                        break
+
+                next_page = page + 1
+                checkpoint_payload = {
+                    "next_page": next_page,
+                    "updated_at": datetime.now().isoformat(),
+                    "run_mode": run_mode,
+                }
+                if discovered_total is not None:
+                    checkpoint_payload["total_elements"] = discovered_total
+                _save_repo_checkpoint(checkpoint_path, checkpoint_payload)
+
+                if hit_run_limit:
+                    console.print(
+                        f"[yellow]Reached run limit ({max_items_this_run} items). "
+                        "You can rerun in repository mode with resume enabled.[/yellow]"
+                    )
+                    break
+
+                page = next_page
 
         elif run_mode_key == "orcid":
             orcid_input = console.input(
