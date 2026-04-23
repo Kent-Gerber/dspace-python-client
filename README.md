@@ -37,7 +37,7 @@ A comprehensive Python client for the DSpace REST API with version-aware compati
 - [Author](#author)
 - [Links](#links)
 
-> This README is organised in two parts. If you just want to **run the bundled examples** against a DSpace server, start with [Running the Examples](#running-the-examples) — many users never need to go further. If you want to **write your own scripts** with the library, continue to [Building with the Library](#building-with-the-library).
+> This README is organised in two parts. If you just want to **run the bundled examples** against a DSpace server, start with [Running the Examples](#running-the-examples); many users never need to go further. If you want to **write your own scripts** with the library, continue to [Building with the Library](#building-with-the-library).
 
 ## Key Features
 
@@ -51,15 +51,15 @@ A comprehensive Python client for the DSpace REST API with version-aware compati
 
 ## Important Safety Notice
 
-Please read this section before running anything — examples or your own scripts — against a real DSpace instance.
+Please read this section before running anything (examples or your own scripts) against a real DSpace instance.
 
 > [!WARNING]
 > **Always run against a test or staging server first.**
-> This client can create, modify, and delete communities, collections, items, bitstreams, EPeople, and groups — often in bulk. Batch operations and cleanup flags are irreversible at scale. Verify behaviour on a non-production instance (e.g. [demo.dspace.org](https://demo.dspace.org) or your own staging environment) before pointing any script at a live repository.
+> This client can create, modify, and delete communities, collections, items, bitstreams, EPeople, and groups, often in bulk. Batch operations and cleanup flags are irreversible at scale. Verify behaviour on a non-production instance (e.g. [demo.dspace.org](https://demo.dspace.org) or your own staging environment) before pointing any script at a live repository.
 
 > [!WARNING]
 > **If you use AI to generate or modify scripts, you must understand every line before running it.**
-> Large language models readily produce plausible-looking code that deletes the wrong things, silently skips validation, or hits the API in ways that look fine in isolation but misbehave against real data. You are responsible for the effects of any code you run against a DSpace repository. Do not run AI-assisted code — even a small edit to an existing example — unless you can explain what each operation does, have read the DSpace REST contract for the endpoints it touches, and have tested it on a throwaway instance first.
+> Large language models readily produce plausible-looking code that deletes the wrong things, silently skips validation, or hits the API in ways that look fine in isolation but misbehave against real data. You are responsible for the effects of any code you run against a DSpace repository. Do not run AI-assisted code (even a small edit to an existing example) unless you can explain what each operation does, have read the DSpace REST contract for the endpoints it touches, and have tested it on a throwaway instance first.
 
 These two rules apply equally to the bundled examples, your own scripts, and anything copied out of the [Recipes](#recipes) section.
 
@@ -88,16 +88,16 @@ All examples follow the same pattern: they prompt for a base URL, username, and 
 
 ### General Tutorials
 
-- **`basic_usage.py`** — Short generic CRUD: community, collection, item, bitstream
-- **`bulk_import.py`** — Batch item creation with adaptive concurrency (`BatchItemCreator`)
-- **`advanced_auth.py`** — Session management and error handling
+- **`basic_usage.py`** - Short generic CRUD: community, collection, item, bitstream
+- **`bulk_import.py`** - Batch item creation with adaptive concurrency (`BatchItemCreator`)
+- **`advanced_auth.py`** - Session management and error handling
 
 ### Seed Scenarios
 
-Located under `examples/seed/`. Inspired by the **dspace-seed** workflow (bundled YAML, no `dspace_seed` package at runtime—only `dspace_client`):
+Located under `examples/seed/`. Inspired by the **dspace-seed** workflow (bundled YAML, no `dspace_seed` package at runtime, only `dspace_client`):
 
-- **`seed/minispace.py`** — One community → collection → item → bitstream; declares **DSpace 9.0**; **`verify_server_version`** after login **by default** (use **`--skip-version-check`** to skip); optional cascade delete.
-- **`seed/megaspace.py`** — Larger scenario: groups, EPeople, collection READ groups, **mega-metadata** and **mega-bitstreams** stress items, adaptive **`BatchItemCreator`** batch import (the library supports an optional **`on_metrics_sample`** callback on **`create_items_batch`** for time-series metrics), view events, optional cleanup. Requires **at least `--collections 2`** (validated at startup). **MegaSpace** also supports courtesy pacing, slow-request reporting, and optional **JSON/Markdown** diagnostics export — see **`examples/seed/README.md`**.
+- **`seed/minispace.py`** - One community → collection → item → bitstream; declares **DSpace 9.0**; **`verify_server_version`** after login **by default** (use **`--skip-version-check`** to skip); optional cascade delete.
+- **`seed/megaspace.py`** - Larger scenario: groups, EPeople, collection READ groups, **mega-metadata** and **mega-bitstreams** stress items, adaptive **`BatchItemCreator`** batch import (the library supports an optional **`on_metrics_sample`** callback on **`create_items_batch`** for time-series metrics), view events, optional cleanup. Requires **at least `--collections 2`** (validated at startup). **MegaSpace** also supports courtesy pacing, slow-request reporting, and optional **JSON/Markdown** diagnostics export; see **`examples/seed/README.md`**.
 
 The large file **`examples/seed/seedpacks/default.yml`** is copied from dspace-seed; sync it manually if the upstream pack changes.
 
@@ -105,8 +105,8 @@ The large file **`examples/seed/seedpacks/default.yml`** is copied from dspace-s
 
 Read-only scripts for inspecting a repository:
 
-- **`examples/count_items_with_pdf_bitstream.py`** — Counts items with at least one PDF bitstream via the authenticated REST API (includes non-public items). Supports resumable caching.
-- **`examples/count_items_with_pdf_bitstream_oai.py`** — Same count via unauthenticated OAI-PMH harvesting, suitable for very large or slow repositories. Cached in CSV so runs can resume.
+- **`examples/count_items_with_pdf_bitstream.py`** - Counts items with at least one PDF bitstream via the authenticated REST API (includes non-public items). Supports resumable caching.
+- **`examples/count_items_with_pdf_bitstream_oai.py`** - Same count via unauthenticated OAI-PMH harvesting, suitable for very large or slow repositories. Cached in CSV so runs can resume.
 
 The underlying library calls used by these scripts are documented in [Recipes](#recipes).
 
@@ -116,7 +116,7 @@ This section is for developers writing their own scripts against the library. If
 
 ### Getting Started
 
-For a minimal, runnable walkthrough — declaring target versions, authenticating, and creating your first community/collection/item — see **[QUICKSTART.md](QUICKSTART.md)**. The rest of this section covers the architecture, API surface, and library conventions that QUICKSTART references.
+For a minimal, runnable walkthrough (declaring target versions, authenticating, and creating your first community/collection/item), see **[QUICKSTART.md](QUICKSTART.md)**. The rest of this section covers the architecture, API surface, and library conventions that QUICKSTART references.
 
 ### Version-First Architecture
 
@@ -226,7 +226,7 @@ The client automatically manages DSpace REST API documentation:
 ```bash
 # First-time (or missing cache): clone the RestContract docs for a given API version
 dspace-docs fetch 9.0
-# Other examples: 7.6, 8.0, bleeding-edge — see `dspace-docs list` for supported labels
+# Other examples: 7.6, 8.0, bleeding-edge (see `dspace-docs list` for supported labels)
 
 # List supported versions and whether each is already present locally
 dspace-docs list
