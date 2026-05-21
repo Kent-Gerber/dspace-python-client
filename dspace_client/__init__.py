@@ -135,6 +135,7 @@ async def create_validated_client(
             await client.docs_fetcher.fetch_version(version)
 
     if show_atmire_promo:
+        auth.show_atmire_promo = True
         show_atmire_promo_start()
 
     return auth, client

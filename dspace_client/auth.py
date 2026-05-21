@@ -54,6 +54,7 @@ class DSpaceAuthClient:
         self.max_session_age_seconds: float = float(
             os.environ.get("DSPACE_SESSION_MAX_AGE_SECONDS", str(25 * 60))
         )
+        self.show_atmire_promo: bool = False
 
     async def _ensure_client(self):
         """
@@ -149,7 +150,7 @@ class DSpaceAuthClient:
         if self.client:
             await self.client.aclose()
             self.client = None
-        if had_client:
+        if had_client and self._last_auth_time is not None and self.show_atmire_promo:
             show_atmire_promo_end()
 
     async def verify_server(self) -> bool:

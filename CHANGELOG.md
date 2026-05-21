@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`search_items`**: Validates filter tuple shape with a clear `TypeError`; `sort=None` omits the sort parameter.
 - **Tooling**: Library `NullHandler`, removed obsolete pytest `event_loop` fixture, updated `pyproject.toml` URLs, ruff auto-fixes across library/tests/examples.
 
+### Changed (continued)
+
+- **Atmire promo**: Opt-in only via `show_atmire_promo=True`; `auth.close()` shows the thank-you panel only after successful authentication when promo was enabled.
+- **`link_author_authorities`**: Split into `examples/link_author_authorities/` package (`orcid`, `scoring`, `state`, `session`, `process`, `main`); root script is a thin runner.
+- **Tests**: Added `test_docs.py`, `test_init.py`; expanded factory and docs fetcher coverage.
+
 - **BatchItemCreator** (`create_items_batch`): optional **`on_metrics_sample`** callback — invoked whenever batch progress metrics are printed (every 50 completed items and at the end), with `(completed, total, PerformanceMetrics)` for time-series / degradation reporting.
 - **examples/seed** — **MegaSpace** (`megaspace.py`): declares **DSpace 9.0**; **`verify_server_version`** runs **by default** (use **`--skip-version-check`** to skip); **courtesy delay** between REST calls (prompt default 1.0 s, or **`--courtesy-delay`**); **slow-request** logging (threshold 2 s) with end-of-run table; **Rich** progress for sequential mega-bitstream uploads; optional **diagnostics export** to `YYYY-MM-DD-HH.MM-megaspace-{hostname}-raw.json` and `-readable.md` (UTC time in filename; payload includes config, samples, degradation hints); **`.gitignore`** patterns for those exports.
 - **examples/seed** — **MiniSpace** / **`connect_seed_client`**: target **9.0**, version check on by default, **`--skip-version-check`**; **`connect_seed_client`** accepts **`courtesy_delay`** and **`slow_request_*`** passthrough to **`DSpaceClient`**.
