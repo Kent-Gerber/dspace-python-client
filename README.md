@@ -520,7 +520,9 @@ You can call **`show_atmire_promo_end`** from **`dspace_client`** manually if yo
 
 ## License
 
-GPL-3.0-or-later - See LICENSE file for details.
+Copyright © 2024–2026 [Atmire](https://www.atmire.com/). Licensed under
+**GPL-3.0-or-later** — see [LICENSE](LICENSE), [NOTICE](NOTICE), and
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
 ## Author
 

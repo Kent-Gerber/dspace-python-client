@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Licensing**: Atmire copyright notice in `LICENSE`; new `NOTICE` and `THIRD_PARTY_LICENSES.md` for attribution and dependency license tracking.
+
 ### Fixed
 
 - **Adaptive concurrency**: `AdaptiveSemaphore` ramp-up now releases pre-held permits; `BatchItemCreator` reuses the live adaptive semaphore; `should_ramp_down` computes throughput from timestamps; removed broken `AdaptiveDelayController` context manager.
