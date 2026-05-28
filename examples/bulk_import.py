@@ -75,6 +75,7 @@ async def main():
             username=username,
             password=password,
             target_versions=TARGET_VERSIONS,
+            show_atmire_promo=True,
         ) as (_auth, client):
             community = await client.create_community("Bulk Import Community")
             collection = await client.create_collection(

@@ -21,6 +21,7 @@ async def connect_fulltext_client(
     slow_request_callback: Callable[[str, str, float], None] | None = None,
 ) -> tuple[DSpaceAuthClient, DSpaceClient]:
     auth = DSpaceAuthClient(base_url, timeout=HTTP_TIMEOUT)
+    auth.show_atmire_promo = True
     jwt, _status = await auth.authenticate(username, password)
 
     client = DSpaceClient(

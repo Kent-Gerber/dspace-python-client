@@ -18,11 +18,7 @@ from collections.abc import Callable
 
 from seed_data import DEFAULT_SEED_HTTP_TIMEOUT
 
-from dspace_client import (
-    DSpaceAuthClient,
-    DSpaceClient,
-    show_atmire_promo_start,
-)
+from dspace_client import DSpaceAuthClient, DSpaceClient
 
 
 async def connect_seed_client(
@@ -45,6 +41,7 @@ async def connect_seed_client(
     ``courtesy_delay`` is passed to ``DSpaceClient`` (0 = no pause between calls).
     """
     auth = DSpaceAuthClient(base_url, timeout=DEFAULT_SEED_HTTP_TIMEOUT)
+    auth.show_atmire_promo = True
     jwt, _status = await auth.authenticate(username, password)
 
     client = DSpaceClient(
@@ -61,8 +58,6 @@ async def connect_seed_client(
 
     if strict_versions:
         await client.verify_server_version(raise_on_mismatch=True)
-
-    show_atmire_promo_start()
 
     return auth, client
 

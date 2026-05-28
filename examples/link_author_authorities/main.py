@@ -126,6 +126,7 @@ async def main() -> None:
 
     # --- Authenticate and create client ---
     auth = DSpaceAuthClient(base_url)
+    auth.show_atmire_promo = True
     jwt, status = await auth.authenticate(username, password)
     if not jwt:
         console.print("[red]Authentication failed.[/red]")

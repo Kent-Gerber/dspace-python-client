@@ -614,6 +614,7 @@ async def main() -> None:
                 username=inputs["username"],
                 password=inputs["password"] or "",
                 target_versions=TARGET_VERSIONS,
+                show_atmire_promo=True,
             )
         else:
             http, client = await create_anonymous_client(

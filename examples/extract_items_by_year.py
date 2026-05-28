@@ -91,6 +91,7 @@ async def main():
 
     # Authenticate
     auth = DSpaceAuthClient(base_url)
+    auth.show_atmire_promo = True
     jwt, status = await auth.authenticate(username, password)
 
     # Ask for throttle delay

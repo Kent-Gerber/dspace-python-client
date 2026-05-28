@@ -120,6 +120,7 @@ async def main():
             username=username,
             password=password,
             target_versions=TARGET_VERSIONS,
+            show_atmire_promo=True,
             slow_request_threshold_seconds=slow_threshold,
             slow_request_callback=on_slow_request,
         )

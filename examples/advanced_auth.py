@@ -68,6 +68,7 @@ async def main():
 
     # Create auth client
     auth = DSpaceAuthClient(base_url)
+    auth.show_atmire_promo = True
 
     try:
         if not await auth.verify_server():

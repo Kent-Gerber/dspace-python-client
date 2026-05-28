@@ -199,6 +199,7 @@ async def main() -> None:
             username=username,
             password=password,
             target_versions=TARGET_VERSIONS,
+            show_atmire_promo=True,
         )
     except ServerVersionMismatchError as e:
         console.print(f"[red]Version mismatch:[/red] {e}")
