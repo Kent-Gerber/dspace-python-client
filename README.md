@@ -138,7 +138,8 @@ Windows
 ```
 py examples\recent_items_with_submitters.py
 ```
-** Seesion management and error handling**
+** Session management and error handling**
+
 Bash
 ```bash
 python examples/advanced_auth.py
