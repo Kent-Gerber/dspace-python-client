@@ -99,12 +99,14 @@ cd path/to/dspace-python-client
 
 From inside the project folder, create a virtual environment, upgrade pip (to satisfy the 21.3+ requirement), and install the client:
 
+Bash
 ```bash
 python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install --upgrade pip
 pip install -e .
 ```
+Windows
 ```windows
 py -m venv .venv
 .venv\Scripts\activate
