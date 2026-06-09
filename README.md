@@ -135,12 +135,19 @@ Run any example by invoking it with Python from the project root, for example:
 **Find recent submissions and submitters**
 
 Windows
-```
+```windows
 py examples\recent_items_with_submitters.py
 ```
-
+Bash
+```bash
+python examples/recent_items_with_submitters.py
+```
 **Session management and error handling**
 
+Windows
+```windows
+py examples\advanced_auth.py
+```
 Bash
 ```bash
 python examples/advanced_auth.py
