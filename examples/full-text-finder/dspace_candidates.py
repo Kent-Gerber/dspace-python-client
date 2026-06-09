@@ -18,18 +18,31 @@ def first_metadata_value(metadata: dict, key: str) -> str:
     return str(first).strip()
 
 
-def extract_doi_from_metadata(metadata: dict) -> str:
-    """Return a single DOI string, or empty if none."""
-    for key in ("dc.identifier.doi",):
-        v = first_metadata_value(metadata, key)
-        if v:
-            return normalize_doi_string(v)
-    uri = first_metadata_value(metadata, "dc.identifier.uri")
-    if uri and "doi.org" in uri.lower():
-        # strip to path after doi.org/
-        m = re.search(r"doi\.org/(.+)", uri, re.IGNORECASE)
+DEFAULT_DOI_FIELD = "dc.identifier.doi"
+
+
+def _doi_from_value(value: str) -> str:
+    """Normalize a raw metadata value to a bare DOI (handles doi.org URLs)."""
+    if "doi.org/" in value.lower():
+        m = re.search(r"doi\.org/(.+)", value, re.IGNORECASE)
         if m:
             return normalize_doi_string(m.group(1).strip())
+    return normalize_doi_string(value)
+
+
+def extract_doi_from_metadata(metadata: dict, doi_field: str = DEFAULT_DOI_FIELD) -> str:
+    """
+    Return a single DOI string from ``doi_field``, or empty if none.
+
+    Falls back to a ``dc.identifier.uri`` value that points at doi.org when the
+    chosen field is empty.
+    """
+    v = first_metadata_value(metadata, doi_field)
+    if v:
+        return _doi_from_value(v)
+    uri = first_metadata_value(metadata, "dc.identifier.uri")
+    if uri and "doi.org" in uri.lower():
+        return _doi_from_value(uri)
     return ""
 
 
@@ -129,12 +142,14 @@ async def find_eligible_items(
     query: str,
     max_items: int | None,
     single: bool,
+    doi_field: str = DEFAULT_DOI_FIELD,
 ) -> AsyncIterator[tuple[str, str, dict]]:
     """
     Yield (uuid, doi, full_item_dict) for items that have a DOI and no PDF in ORIGINAL.
 
     If single is True, stop after the first eligible item.
     max_items caps how many eligible items are yielded in bulk mode.
+    doi_field selects which metadata field is read for the DOI.
     """
     eligible = 0
     async for item_uuid in iter_discovery_item_uuids(client, query=query):
@@ -143,7 +158,7 @@ async def find_eligible_items(
         except Exception:
             continue
         metadata = full.get("metadata") or {}
-        doi = extract_doi_from_metadata(metadata)
+        doi = extract_doi_from_metadata(metadata, doi_field)
         if not doi:
             continue
         has_pdf = await item_has_pdf_in_original(client, item_uuid, pdf_format_id)
@@ -158,6 +173,7 @@ async def find_eligible_items(
 
 
 __all__ = [
+    "DEFAULT_DOI_FIELD",
     "extract_doi_from_metadata",
     "find_eligible_items",
     "first_metadata_value",

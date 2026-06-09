@@ -464,13 +464,17 @@ class DSpaceClient:
         if "dc.title" not in metadata:
             metadata["dc.title"] = [{"value": filename, "language": None, "authority": None, "confidence": -1}]
 
-        try:
-            files = {"file": (filename, content, "application/octet-stream")}
+        # Per the DSpace REST contract, bitstream name + metadata must be supplied
+        # as a single JSON "properties" multipart part (sent with content type
+        # application/json), not as a plain "metadata" form field. Sending it any
+        # other way causes the server to silently drop the metadata at creation.
+        properties = {"name": filename, "metadata": metadata}
 
-            # Add metadata as form fields if needed
-            data = {}
-            if metadata:
-                data["metadata"] = orjson.dumps(metadata).decode()
+        try:
+            files = {
+                "file": (filename, content, "application/octet-stream"),
+                "properties": (None, orjson.dumps(properties).decode(), "application/json"),
+            }
 
             # Use the persistent authenticated client with CSRF token
             response = await self.client.post(
@@ -480,7 +484,6 @@ class DSpaceClient:
                     "X-XSRF-TOKEN": self.csrf_token,
                 },
                 files=files,
-                data=data,
             )
 
             if response.status_code >= 400:
