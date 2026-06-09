@@ -132,6 +132,11 @@ All examples follow the same pattern: they prompt for a base URL, username, and 
 
 Run any example by invoking it with Python from the project root, for example:
 
+Find recent submissions and submitters
+Windows
+```
+py examples\recent_items_with_submitters.py
+```
 ```bash
 python examples/advanced_auth.py
 ```
