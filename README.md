@@ -111,6 +111,7 @@ py -m venv .venv
 where python # to confirm virtual enviromnemt is activated and location of python interpreter
 py -m pip install --upgrade pip
 py -m pip --version
+pip install -e .
 ```
 
 For optional dependencies (seed scenarios, dev tools) and more detail, see [Contributing → Installation from Source](#installation-from-source).
