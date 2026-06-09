@@ -105,6 +105,13 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install --upgrade pip
 pip install -e .
 ```
+```windows
+py -m venv .venv
+.venv\Scripts\activate
+where python # to confirm virtual enviromnemt is activated and location of python interpreter
+py -m pip install --upgrade pip
+py -m pip --version
+```
 
 For optional dependencies (seed scenarios, dev tools) and more detail, see [Contributing → Installation from Source](#installation-from-source).
 
