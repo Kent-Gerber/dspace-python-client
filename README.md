@@ -139,7 +139,7 @@ Windows
 py examples\recent_items_with_submitters.py
 ```
 
-** Session management and error handling**
+**Session management and error handling**
 
 Bash
 ```bash
